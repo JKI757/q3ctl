@@ -19,7 +19,12 @@ curl --fail --location --proto '=https' --tlsv1.2 \
   -o "$tmp/q3ctl" "${base}/q3ctl-${arch}"
 curl --fail --location --proto '=https' --tlsv1.2 \
   -o "$tmp/SHA256SUMS" "${base}/SHA256SUMS"
-( cd "$tmp" && grep " q3ctl-${arch}$" SHA256SUMS | sed "s# q3ctl-${arch}$# q3ctl#" | shasum -a 256 -c - )
+expected="$(awk '$2 ~ /q3ctl-linux-amd64$/ {print $1; exit}' "$tmp/SHA256SUMS")"
+actual="$(shasum -a 256 "$tmp/q3ctl" | awk '{print $1}')"
+if [[ -z "$expected" || "$expected" != "$actual" ]]; then
+  echo "checksum verification failed" >&2
+  exit 1
+fi
 
 install -m 0755 -o root -g root "$tmp/q3ctl" /usr/local/bin/q3ctl
 install -m 0644 -o root -g root /home/josh/q3ctl-release/q3ctl.service /etc/systemd/system/q3ctl.service 2>/dev/null || true
