@@ -68,7 +68,9 @@ RestartSec=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+# The bridge needs read-only access to Quake's own homepath. q3ctl itself
+# remains separately sandboxed with ProtectHome=true.
+ProtectHome=read-only
 ReadWritePaths=/var/log/q3ctl
 
 [Install]
