@@ -15,6 +15,7 @@ type Config struct {
 	StateFile     string `json:"state_file"`
 	AuditFile     string `json:"audit_file"`
 	GameLogFile   string `json:"game_log_file"`
+	GameDataPath  string `json:"game_data_path"`
 	AdminPassword string `json:"-"`
 	RCONPassword  string `json:"-"`
 }
@@ -44,6 +45,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.GameLogFile == "" {
 		c.GameLogFile = "/var/log/q3ctl/game.log"
+	}
+	if c.GameDataPath == "" {
+		c.GameDataPath = "/usr/lib/ioquake3/baseq3"
 	}
 	if c.AdminUser == "" || c.AdminPassword == "" || c.RCONPassword == "" {
 		return Config{}, errors.New("admin_user and Q3CTL_ADMIN_PASSWORD/Q3CTL_RCON_PASSWORD required")

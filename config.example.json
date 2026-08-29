@@ -2,5 +2,6 @@
   "listen": "127.0.0.1:8088",
   "rcon_addr": "127.0.0.1:27960",
   "admin_user": "admin",
-  "game_log_file": "/var/log/q3ctl/game.log"
+  "game_log_file": "/var/log/q3ctl/game.log",
+  "game_data_path": "/usr/lib/ioquake3/baseq3"
 }

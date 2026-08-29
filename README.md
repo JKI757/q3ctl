@@ -8,6 +8,8 @@
 - Structured map, restart, announcement, and player-kick controls.
 - Persistent bot policy and **editable map rotation**.
 - Rotation entries define map, gametype, time limit, frag limit, and capture limit.
+- The map selector discovers installed `.pk3`/`.pk3dir` BSP assets automatically; no source-code map whitelist or q3ctl restart is needed after a package is added.
+- Live status includes one-minute host load, available memory, and uptime indicators for quick capacity checks.
 - **Save rotation** writes an atomically replaced state file. **Apply at next map** safely installs Quake's `d1 … dN` command chain without interrupting the current match.
 - SSE streams both the game event log and q3ctl’s audited control actions.
 
@@ -50,7 +52,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dis
   "admin_user": "admin",
   "state_file": "/var/lib/q3ctl/state.json",
   "audit_file": "/var/log/q3ctl/audit.jsonl",
-  "game_log_file": "/var/log/q3ctl/game.log"
+  "game_log_file": "/var/log/q3ctl/game.log",
+  "game_data_path": "/usr/lib/ioquake3/baseq3"
 }
 ```
 
@@ -63,7 +66,7 @@ Q3CTL_RCON_PASSWORD=<matching-Quake-rcon-password>
 
 ## Rotation behavior
 
-A saved rotation is durable in `/var/lib/q3ctl/state.json`. Applying it renders the same looping `d1…dN` pattern as the server’s stock configuration and sets `nextmap` to `vstr d1`. It does **not** load a map, restart the service, or cut off the current match. The first edited rotation map begins at the next map transition.
+A saved rotation is durable in `/var/lib/q3ctl/state.json`. Applying it renders the same looping `d1…dN` pattern as the server’s stock configuration and sets `nextmap` to `vstr d1`. It does **not** load a map, restart the service, or cut off the current match. The first edited rotation map begins at the next map transition. q3ctl validates each entry against the server's current installed asset catalog.
 
 ## API highlights
 

@@ -4,5 +4,6 @@
   "admin_user": "admin",
   "state_file": "/var/lib/q3ctl/state.json",
   "audit_file": "/var/log/q3ctl/audit.jsonl",
-  "game_log_file": "/var/log/q3ctl/game.log"
+  "game_log_file": "/var/log/q3ctl/game.log",
+  "game_data_path": "/usr/lib/ioquake3/baseq3"
 }

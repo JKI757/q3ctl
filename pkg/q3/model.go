@@ -39,11 +39,15 @@ func ValidGameType(gameType int) bool {
 }
 
 func (r Rotation) Validate() error {
+	return r.ValidateWithMaps(StockMaps)
+}
+
+func (r Rotation) ValidateWithMaps(maps []string) error {
 	if len(r) == 0 || len(r) > 12 {
 		return errors.New("rotation must contain 1 to 12 entries")
 	}
 	for _, entry := range r {
-		if !KnownMap(entry.Map) || !ValidGameType(entry.GameType) {
+		if !ContainsMap(maps, entry.Map) || !ValidGameType(entry.GameType) {
 			return errors.New("rotation contains an invalid map or mode")
 		}
 		if entry.TimeLimit < 0 || entry.TimeLimit > 120 || entry.FragLimit < 0 || entry.FragLimit > 999 || entry.CaptureLimit < 0 || entry.CaptureLimit > 99 {
@@ -57,7 +61,11 @@ func (r Rotation) Validate() error {
 // It defines a closed d1..dN chain and changes the active server's next map;
 // it deliberately does not load a map or interrupt the current match.
 func (r Rotation) NextMapCommands() (string, error) {
-	if err := r.Validate(); err != nil {
+	return r.NextMapCommandsWithMaps(StockMaps)
+}
+
+func (r Rotation) NextMapCommandsWithMaps(maps []string) (string, error) {
+	if err := r.ValidateWithMaps(maps); err != nil {
 		return "", err
 	}
 	commands := make([]string, 0, len(r)+1)
