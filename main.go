@@ -4,7 +4,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -83,6 +85,7 @@ type server struct {
 	mu          sync.RWMutex
 	state       Persisted
 	subscribers map[chan Audit]struct{}
+	csrfToken   string
 }
 
 func defaults() Persisted {
@@ -95,7 +98,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := &server{cfg: cfg, state: defaults(), subscribers: map[chan Audit]struct{}{}}
+	s := &server{cfg: cfg, state: defaults(), subscribers: map[chan Audit]struct{}{}, csrfToken: newCSRFToken()}
 	s.loadState()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.health)
@@ -146,6 +149,14 @@ func load(path string) (Config, error) {
 	}
 	return c, nil
 }
+func newCSRFToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
 func (s *server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
@@ -153,6 +164,14 @@ func (s *server) auth(next http.Handler) http.Handler {
 			w.Header().Set("WWW-Authenticate", `Basic realm="q3ctl"`)
 			http.Error(w, "authentication required", 401)
 			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			origin := r.Header.Get("Origin")
+			host := "https://" + r.Host
+			if origin != host || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(s.csrfToken)) != 1 {
+				http.Error(w, "csrf validation failed", http.StatusForbidden)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -542,9 +561,9 @@ func (s *server) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, html)
+	fmt.Fprint(w, strings.ReplaceAll(html, "__CSRF__", s.csrfToken))
 }
 
-var html = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>q3ctl</title><style>:root{color-scheme:dark}body{font:15px system-ui;background:#10151c;color:#e8edf3;margin:0}main{max-width:1200px;margin:auto;padding:22px}h1{margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;margin:14px 0}.card{background:#18212c;border:1px solid #304050;border-radius:10px;padding:14px}button,select,input{font:inherit;padding:8px;margin:3px}button{background:#2563eb;color:white;border:0;border-radius:6px}button.danger{background:#b91c1c}pre{white-space:pre-wrap;background:#090d12;padding:12px;max-height:280px;overflow:auto;border-radius:6px}.pill{padding:3px 7px;border-radius:12px;background:#28435d}label{display:block;margin:5px 0}</style><main><h1>Quake 3 Control</h1><p>Private Tailscale dashboard · Server-local RCON</p><div class=grid><section class=card><h2>Live server</h2><div id=summary>Loading…</div><button onclick=refresh()>Refresh status</button><button onclick=post('/api/v1/maps/restart',{})>Restart map (5s)</button><h3>Players</h3><div id=players></div></section><section class=card><h2>Map & mode</h2><label>Map <select id=map></select></label><label>Mode <select id=mode><option value=4>CTF</option><option value=3>TDM</option></select></label><button onclick=loadMap()>Load map</button><h3>Announcement</h3><input id=msg maxlength=140 placeholder="Message to all players"><button onclick=announce()>Send</button></section><section class=card><h2>Bot director</h2><label>Human team <select id=team><option>red</option><option>blue</option></select></label><label>Bots/team <input id=bots type=number min=0 max=8></label><label>Base skill <input id=skill type=number min=1 max=5></label><label><input id=adaptive type=checkbox> adaptive next-round policy</label><button onclick=savePolicy()>Save policy</button><button onclick=reconcile()>Rebuild bot teams</button><p><small>Rebuild is explicit: it removes/re-adds bots. Stock Q3 does not let the server forcibly move human clients without a game mod.</small></p></section><section class=card><h2>Rotation</h2><div id=rotation></div><button onclick=saveRotation()>Save rotation</button><p><small>Stored rotation is ready for next configuration apply; changing it does not interrupt the live match.</small></p></section></div><section class=card><h2>Streaming audit log</h2><pre id=log>Connecting…</pre></section></main><script>let state;const $=id=>document.getElementById(id);async function api(u,o){let r=await fetch(u,o);if(!r.ok)throw Error(await r.text());return r.json()}async function post(u,b){try{await api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});refresh()}catch(e){alert(e)}}function esc(x){return String(x).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}async function refresh(){try{state=await api('/api/v1/status');let s=state.server;$('summary').innerHTML='<b>'+esc(s.map)+'</b> · '+(s.gametype===4?'CTF':'TDM')+' · '+s.players.length+'/'+s.max_clients+' players';$('players').innerHTML=s.players.map(p=>'<div><span class=pill>'+p.id+'</span> '+esc(p.name)+' '+(p.bot?'BOT':'HUMAN')+' score '+p.score+' <button class=danger onclick="kick('+p.id+')">Kick</button></div>').join('')||'Nobody connected';$('team').value=state.policy.human_team;$('bots').value=state.policy.bots_per_team;$('skill').value=state.policy.base_skill;$('adaptive').checked=state.policy.adaptive;$('rotation').innerHTML=state.rotation.map((r,i)=>'<div>'+i+': '+r.map+' · '+(r.gametype===4?'CTF':'TDM')+' · '+r.timelimit+' min</div>').join('')}catch(e){$('summary').textContent='Status unavailable: '+e}}async function kick(id){if(confirm('Kick client '+id+'?'))await post('/api/v1/players/kick',{id})}async function loadMap(){if(confirm('Load selected map now?'))await post('/api/v1/maps/load',{map:$('map').value,gametype:+$('mode').value})}async function announce(){await post('/api/v1/announce',{message:$('msg').value});$('msg').value=''}async function savePolicy(){let p={...state.policy,human_team:$('team').value,bots_per_team:+$('bots').value,base_skill:+$('skill').value,adaptive:$('adaptive').checked};try{await api('/api/v1/bots/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});refresh()}catch(e){alert(e)}}async function reconcile(){if(confirm('Kick and rebuild all bots on configured teams?'))await post('/api/v1/bots/reconcile',{})}async function saveRotation(){try{await api('/api/v1/rotation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(state.rotation)});alert('Rotation saved')}catch(e){alert(e)}}async function init(){let maps=await api('/api/v1/maps');$('map').innerHTML=maps.map(x=>'<option>'+x+'</option>').join('');refresh();let es=new EventSource('/api/v1/logs/stream');es.addEventListener('audit',e=>{$('log').textContent+=JSON.stringify(JSON.parse(e.data))+'\n';$('log').scrollTop=$('log').scrollHeight});es.onerror=()=>{$('log').textContent+='[stream reconnecting]\n'}}init()</script>`
+var html = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>q3ctl</title><style>:root{color-scheme:dark}body{font:15px system-ui;background:#10151c;color:#e8edf3;margin:0}main{max-width:1200px;margin:auto;padding:22px}h1{margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;margin:14px 0}.card{background:#18212c;border:1px solid #304050;border-radius:10px;padding:14px}button,select,input{font:inherit;padding:8px;margin:3px}button{background:#2563eb;color:white;border:0;border-radius:6px}button.danger{background:#b91c1c}pre{white-space:pre-wrap;background:#090d12;padding:12px;max-height:280px;overflow:auto;border-radius:6px}.pill{padding:3px 7px;border-radius:12px;background:#28435d}label{display:block;margin:5px 0}</style><main><h1>Quake 3 Control</h1><p>Private Tailscale dashboard · Server-local RCON</p><div class=grid><section class=card><h2>Live server</h2><div id=summary>Loading…</div><button onclick=refresh()>Refresh status</button><button onclick=post('/api/v1/maps/restart',{})>Restart map (5s)</button><h3>Players</h3><div id=players></div></section><section class=card><h2>Map & mode</h2><label>Map <select id=map></select></label><label>Mode <select id=mode><option value=4>CTF</option><option value=3>TDM</option></select></label><button onclick=loadMap()>Load map</button><h3>Announcement</h3><input id=msg maxlength=140 placeholder="Message to all players"><button onclick=announce()>Send</button></section><section class=card><h2>Bot director</h2><label>Human team <select id=team><option>red</option><option>blue</option></select></label><label>Bots/team <input id=bots type=number min=0 max=8></label><label>Base skill <input id=skill type=number min=1 max=5></label><label><input id=adaptive type=checkbox> adaptive next-round policy</label><button onclick=savePolicy()>Save policy</button><button onclick=reconcile()>Rebuild bot teams</button><p><small>Rebuild is explicit: it removes/re-adds bots. Stock Q3 does not let the server forcibly move human clients without a game mod.</small></p></section><section class=card><h2>Rotation</h2><div id=rotation></div><button onclick=saveRotation()>Save rotation</button><p><small>Stored rotation is ready for next configuration apply; changing it does not interrupt the live match.</small></p></section></div><section class=card><h2>Streaming audit log</h2><pre id=log>Connecting…</pre></section></main><script>const csrf='__CSRF__';let state;const $=id=>document.getElementById(id);async function api(u,o={}){let h=new Headers(o.headers||{});if(o.method&&o.method!=='GET'){h.set('X-CSRF-Token',csrf)}let r=await fetch(u,{...o,headers:h});if(!r.ok)throw Error(await r.text());return r.json()}async function post(u,b){try{await api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});refresh()}catch(e){alert(e)}}function esc(x){return String(x).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}async function refresh(){try{state=await api('/api/v1/status');let s=state.server;$('summary').innerHTML='<b>'+esc(s.map)+'</b> · '+(s.gametype===4?'CTF':'TDM')+' · '+s.players.length+'/'+s.max_clients+' players';$('players').innerHTML=s.players.map(p=>'<div><span class=pill>'+p.id+'</span> '+esc(p.name)+' '+(p.bot?'BOT':'HUMAN')+' score '+p.score+' <button class=danger onclick="kick('+p.id+')">Kick</button></div>').join('')||'Nobody connected';$('team').value=state.policy.human_team;$('bots').value=state.policy.bots_per_team;$('skill').value=state.policy.base_skill;$('adaptive').checked=state.policy.adaptive;$('rotation').innerHTML=state.rotation.map((r,i)=>'<div>'+i+': '+r.map+' · '+(r.gametype===4?'CTF':'TDM')+' · '+r.timelimit+' min</div>').join('')}catch(e){$('summary').textContent='Status unavailable: '+e}}async function kick(id){if(confirm('Kick client '+id+'?'))await post('/api/v1/players/kick',{id})}async function loadMap(){if(confirm('Load selected map now?'))await post('/api/v1/maps/load',{map:$('map').value,gametype:+$('mode').value})}async function announce(){await post('/api/v1/announce',{message:$('msg').value});$('msg').value=''}async function savePolicy(){let p={...state.policy,human_team:$('team').value,bots_per_team:+$('bots').value,base_skill:+$('skill').value,adaptive:$('adaptive').checked};try{await api('/api/v1/bots/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});refresh()}catch(e){alert(e)}}async function reconcile(){if(confirm('Kick and rebuild all bots on configured teams?'))await post('/api/v1/bots/reconcile',{})}async function saveRotation(){try{await api('/api/v1/rotation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(state.rotation)});alert('Rotation saved')}catch(e){alert(e)}}async function init(){let maps=await api('/api/v1/maps');$('map').innerHTML=maps.map(x=>'<option>'+x+'</option>').join('');refresh();let es=new EventSource('/api/v1/logs/stream');es.addEventListener('audit',e=>{$('log').textContent+=JSON.stringify(JSON.parse(e.data))+'\n';$('log').scrollTop=$('log').scrollHeight});es.onerror=()=>{$('log').textContent+='[stream reconnecting]\n'}}init()</script>`
 
 func init() { sort.Strings([]string{}) }
