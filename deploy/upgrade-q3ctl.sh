@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Upgrade q3ctl from its signed-by-checksum GitHub release asset.
+# Run on C62: sudo bash /home/josh/upgrade-q3ctl.sh
+set -euo pipefail
+
+repo="JKI757/q3ctl"
+version="${1:-v0.2.0}"
+arch="linux-amd64"
+base="https://github.com/${repo}/releases/download/${version}"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo "Run with sudo: sudo $0 [version]" >&2
+  exit 1
+fi
+
+curl --fail --location --proto '=https' --tlsv1.2 \
+  -o "$tmp/q3ctl" "${base}/q3ctl-${arch}"
+curl --fail --location --proto '=https' --tlsv1.2 \
+  -o "$tmp/SHA256SUMS" "${base}/SHA256SUMS"
+( cd "$tmp" && grep " q3ctl-${arch}$" SHA256SUMS | sed "s# q3ctl-${arch}$# q3ctl#" | shasum -a 256 -c - )
+
+install -m 0755 -o root -g root "$tmp/q3ctl" /usr/local/bin/q3ctl
+install -m 0644 -o root -g root /home/josh/q3ctl-release/q3ctl.service /etc/systemd/system/q3ctl.service 2>/dev/null || true
+systemctl daemon-reload
+systemctl restart q3ctl.service
+systemctl is-active --quiet q3ctl.service
+ss -ltn | grep -q '127.0.0.1:8088'
+echo "q3ctl ${version} installed; systemd service is active on 127.0.0.1:8088."
