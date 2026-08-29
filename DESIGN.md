@@ -46,9 +46,10 @@ flowchart LR
 - installed map inventory derived from `.pk3` archives;
 - one-click next map / map restart;
 - editable named rotations, each entry declaring map, gametype, time/frag/capture limits;
-- validate map availability before applying;
-- save a timestamped config backup and show a config diff before apply;
-- apply atomically, restart, then query `getstatus` to confirm the intended map/mode.
+- validate map availability before saving or applying;
+- save the structured definition atomically to q3ctl state;
+- apply a validated `d1…dN` next-map chain over server-local RCON without restarting or interrupting the active match;
+- record the apply action and confirm the selected map/mode after the next map transition.
 
 ### Bots and teams
 
@@ -100,8 +101,8 @@ All mutating routes require authentication and a CSRF token in the browser UI.
 ## Acceptance tests
 
 - Requests without auth receive `401`; dashboard remains loopback-only.
-- A rotation with a nonexistent map is rejected without modifying `server.cfg`.
-- Applying a valid rotation makes a backup, changes config, restarts the service, and verifies the live map/mode through `getstatus`.
+- A rotation with a nonexistent map or unsafe limit is rejected without modifying persisted state or issuing RCON.
+- Saving a valid rotation atomically replaces q3ctl state; applying it updates only Quake's next-map chain and does not restart or interrupt the current match.
 - In a CTF test, two human players are placed on the configured side and configured bots fill both sides only at a safe point.
 - Adaptive controller changes skill only after configured evidence, never beyond 1–5, and records why.
 - Every lifecycle operation reports final systemd state; failure does not claim success.

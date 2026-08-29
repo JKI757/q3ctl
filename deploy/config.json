@@ -1,5 +1,8 @@
 {
   "listen": "127.0.0.1:8088",
   "rcon_addr": "127.0.0.1:27960",
-  "admin_user": "josh"
+  "admin_user": "josh",
+  "state_file": "/var/lib/q3ctl/state.json",
+  "audit_file": "/var/log/q3ctl/audit.jsonl",
+  "game_log_file": "/var/log/q3ctl/game.log"
 }
