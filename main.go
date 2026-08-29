@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -30,6 +31,7 @@ type Config struct {
 	AdminUser     string `json:"admin_user"`
 	StateFile     string `json:"state_file"`
 	AuditFile     string `json:"audit_file"`
+	GameLogFile   string `json:"game_log_file"`
 	AdminPassword string `json:"-"`
 	RCONPassword  string `json:"-"`
 }
@@ -57,6 +59,7 @@ type Player struct {
 	Score   int    `json:"score"`
 	Ping    int    `json:"ping"`
 	Name    string `json:"name"`
+	RawName string `json:"raw_name"`
 	Address string `json:"address"`
 	Bot     bool   `json:"bot"`
 }
@@ -140,6 +143,9 @@ func load(path string) (Config, error) {
 	}
 	if c.AuditFile == "" {
 		c.AuditFile = "/var/log/q3ctl/audit.jsonl"
+	}
+	if c.GameLogFile == "" {
+		c.GameLogFile = "/usr/lib/ioquake3/baseq3/q3games.log"
 	}
 	if c.AdminUser == "" || c.AdminPassword == "" || c.RCONPassword == "" {
 		return c, errors.New("admin_user and Q3CTL_ADMIN_PASSWORD/Q3CTL_RCON_PASSWORD required")
@@ -225,11 +231,26 @@ func parseStatus(raw string) Status {
 		id, _ := strconv.Atoi(m[1])
 		score, _ := strconv.Atoi(m[2])
 		ping, _ := strconv.Atoi(m[3])
-		name := strings.TrimSpace(m[4])
+		rawName := strings.TrimSpace(m[4])
+		name := stripQ3Colors(rawName)
 		addr := strings.TrimSpace(m[5])
-		st.Players = append(st.Players, Player{id, score, ping, name, addr, strings.Contains(addr, "bot")})
+		st.Players = append(st.Players, Player{ID: id, Score: score, Ping: ping, Name: name, RawName: rawName, Address: addr, Bot: strings.Contains(addr, "bot")})
 	}
 	return st
+}
+
+// stripQ3Colors removes the two-byte ^<code> sequences that Q3 uses to color
+// player names. The raw name is retained in the API for diagnostics.
+func stripQ3Colors(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '^' && i+1 < len(s) {
+			i++
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 func (s *server) live() (Status, error) {
 	raw, e := s.rcon("status")
@@ -521,6 +542,70 @@ func (s *server) readAudit() []Audit {
 	}
 	return outp
 }
+
+// readGameLog reads only the configured server-side log file. It intentionally
+// never accepts a path from the browser. On a new SSE connection it sends the
+// most recent 128 KiB; later calls return only appended lines.
+func readGameLog(path string, offset *int64, initial bool) ([]string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() < *offset {
+		*offset = 0 // log rotation/truncation
+	}
+	start := *offset
+	skipPartial := false
+	if initial && start == 0 && info.Size() > 128*1024 {
+		start = info.Size() - 128*1024
+		skipPartial = true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if _, err = f.Seek(start, io.SeekStart); err != nil {
+		return nil, err
+	}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 4096), 256*1024)
+	if skipPartial {
+		// The initial tail might begin halfway through a log line.
+		sc.Scan()
+	}
+	lines := make([]string, 0)
+	for sc.Scan() {
+		line := sanitizeLogLine(sc.Text())
+		if len(line) > 0 {
+			lines = append(lines, line)
+		}
+	}
+	if err = sc.Err(); err != nil {
+		return nil, err
+	}
+	*offset = info.Size()
+	return lines, nil
+}
+
+func sanitizeLogLine(line string) string {
+	line = strings.Map(func(r rune) rune {
+		if r == '	' || r >= ' ' {
+			return r
+		}
+		return -1
+	}, line)
+	if len(line) > 4096 {
+		return line[:4096] + " [truncated]"
+	}
+	return line
+}
+
+func writeSSE(w io.Writer, event string, value any) {
+	b, _ := json.Marshal(value)
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+}
+
 func (s *server) stream(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -535,20 +620,37 @@ func (s *server) stream(w http.ResponseWriter, r *http.Request) {
 	s.subscribers[ch] = struct{}{}
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.subscribers, ch); s.mu.Unlock() }()
-	fmt.Fprint(w, "event: connected\ndata: {\"message\":\"audit stream connected\"}\n\n")
+	writeSSE(w, "connected", map[string]string{"message": "game and control log stream connected"})
 	for _, a := range s.readAudit() {
-		b, _ := json.Marshal(a)
-		fmt.Fprintf(w, "event: audit\ndata: %s\n\n", b)
+		writeSSE(w, "audit", a)
+	}
+	var gameOffset int64
+	if lines, err := readGameLog(s.cfg.GameLogFile, &gameOffset, true); err != nil {
+		writeSSE(w, "game", map[string]string{"line": "[game log unavailable: waiting for " + s.cfg.GameLogFile + "]"})
+	} else {
+		for _, line := range lines {
+			writeSSE(w, "game", map[string]string{"line": line})
+		}
 	}
 	fl.Flush()
 	ping := time.NewTicker(20 * time.Second)
+	tail := time.NewTicker(time.Second)
 	defer ping.Stop()
+	defer tail.Stop()
 	for {
 		select {
 		case a := <-ch:
-			b, _ := json.Marshal(a)
-			fmt.Fprintf(w, "event: audit\ndata: %s\n\n", b)
+			writeSSE(w, "audit", a)
 			fl.Flush()
+		case <-tail.C:
+			if lines, err := readGameLog(s.cfg.GameLogFile, &gameOffset, false); err == nil {
+				for _, line := range lines {
+					writeSSE(w, "game", map[string]string{"line": line})
+				}
+				if len(lines) > 0 {
+					fl.Flush()
+				}
+			}
 		case <-ping.C:
 			fmt.Fprint(w, "event: ping\ndata: {}\n\n")
 			fl.Flush()
@@ -580,6 +682,6 @@ func (s *server) dashboard(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, strings.ReplaceAll(html, "__CSRF__", s.csrfToken))
 }
 
-var html = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>q3ctl</title><style>:root{color-scheme:dark}body{font:15px system-ui;background:#10151c;color:#e8edf3;margin:0}main{max-width:1200px;margin:auto;padding:22px}h1{margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;margin:14px 0}.card{background:#18212c;border:1px solid #304050;border-radius:10px;padding:14px}button,select,input{font:inherit;padding:8px;margin:3px}button{background:#2563eb;color:white;border:0;border-radius:6px}button.danger{background:#b91c1c}pre{white-space:pre-wrap;background:#090d12;padding:12px;max-height:280px;overflow:auto;border-radius:6px}.pill{padding:3px 7px;border-radius:12px;background:#28435d}label{display:block;margin:5px 0}</style><main><h1>Quake 3 Control</h1><p>Private Tailscale dashboard · Server-local RCON</p><div class=grid><section class=card><h2>Live server</h2><div id=summary>Loading…</div><button onclick=refresh()>Refresh status</button><button onclick=post('/api/v1/maps/restart',{})>Restart map (5s)</button><h3>Players</h3><div id=players></div></section><section class=card><h2>Map & mode</h2><label>Map <select id=map></select></label><label>Mode <select id=mode><option value=0>Free For All</option><option value=1>Tournament</option><option value=3>Team Deathmatch</option><option value=4>Capture the Flag</option></select></label><button onclick=loadMap()>Load map</button><h3>Announcement</h3><input id=msg maxlength=140 placeholder="Message to all players"><button onclick=announce()>Send</button></section><section class=card><h2>Bot director</h2><label>Human team <select id=team><option>red</option><option>blue</option></select></label><label>Bots/team <input id=bots type=number min=0 max=8></label><label>Base skill <input id=skill type=number min=1 max=5></label><label><input id=adaptive type=checkbox> adaptive next-round policy</label><button onclick=savePolicy()>Save policy</button><button onclick=reconcile()>Rebuild bot teams</button><p><small>Rebuild is explicit: it removes/re-adds bots. Stock Q3 does not let the server forcibly move human clients without a game mod.</small></p></section><section class=card><h2>Rotation</h2><div id=rotation></div><button onclick=saveRotation()>Save rotation</button><p><small>Stored rotation is ready for next configuration apply; changing it does not interrupt the live match.</small></p></section></div><section class=card><h2>Streaming audit log</h2><pre id=log>Connecting…</pre></section></main><script>const csrf='__CSRF__';let state;const $=id=>document.getElementById(id);async function api(u,o={}){let h=new Headers(o.headers||{});if(o.method&&o.method!=='GET'){h.set('X-CSRF-Token',csrf)}let r=await fetch(u,{...o,headers:h});if(!r.ok)throw Error(await r.text());return r.json()}async function post(u,b){try{await api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});refresh()}catch(e){alert(e)}}function esc(x){return String(x).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}async function refresh(){try{state=await api('/api/v1/status');let s=state.server;$('summary').innerHTML='<b>'+esc(s.map)+'</b> · '+(s.gametype===4?'CTF':'TDM')+' · '+s.players.length+'/'+s.max_clients+' players';$('players').innerHTML=s.players.map(p=>'<div><span class=pill>'+p.id+'</span> '+esc(p.name)+' '+(p.bot?'BOT':'HUMAN')+' score '+p.score+' <button class=danger onclick="kick('+p.id+')">Kick</button></div>').join('')||'Nobody connected';$('team').value=state.policy.human_team;$('bots').value=state.policy.bots_per_team;$('skill').value=state.policy.base_skill;$('adaptive').checked=state.policy.adaptive;$('rotation').innerHTML=state.rotation.map((r,i)=>'<div>'+i+': '+r.map+' · '+(r.gametype===4?'CTF':'TDM')+' · '+r.timelimit+' min</div>').join('')}catch(e){$('summary').textContent='Status unavailable: '+e}}async function kick(id){if(confirm('Kick client '+id+'?'))await post('/api/v1/players/kick',{id})}async function loadMap(){if(confirm('Load selected map now?'))await post('/api/v1/maps/load',{map:$('map').value,gametype:+$('mode').value})}async function announce(){await post('/api/v1/announce',{message:$('msg').value});$('msg').value=''}async function savePolicy(){let p={...state.policy,human_team:$('team').value,bots_per_team:+$('bots').value,base_skill:+$('skill').value,adaptive:$('adaptive').checked};try{await api('/api/v1/bots/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});refresh()}catch(e){alert(e)}}async function reconcile(){if(confirm('Kick and rebuild all bots on configured teams?'))await post('/api/v1/bots/reconcile',{})}async function saveRotation(){try{await api('/api/v1/rotation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(state.rotation)});alert('Rotation saved')}catch(e){alert(e)}}async function init(){let maps=await api('/api/v1/maps');$('map').innerHTML=maps.map(x=>'<option>'+x+'</option>').join('');refresh();let es=new EventSource('/api/v1/logs/stream');es.addEventListener('connected',e=>{$('log').textContent='[connected] '+JSON.parse(e.data).message+'\n'});es.addEventListener('audit',e=>{$('log').textContent+=JSON.stringify(JSON.parse(e.data))+'\n';$('log').scrollTop=$('log').scrollHeight});es.onerror=()=>{$('log').textContent+='[stream reconnecting]\n'}}init()</script>`
+var html = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>q3ctl</title><style>:root{color-scheme:dark}body{font:15px system-ui;background:#10151c;color:#e8edf3;margin:0}main{max-width:1200px;margin:auto;padding:22px}h1{margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;margin:14px 0}.card{background:#18212c;border:1px solid #304050;border-radius:10px;padding:14px}button,select,input{font:inherit;padding:8px;margin:3px}button{background:#2563eb;color:white;border:0;border-radius:6px;cursor:pointer;transition:transform .08s,filter .12s,opacity .12s}button:hover{filter:brightness(1.12)}button:active,button.pressed{transform:translateY(2px) scale(.98);filter:brightness(.8)}button:disabled{opacity:.62;cursor:wait}button.danger{background:#b91c1c}pre{white-space:pre-wrap;background:#090d12;padding:12px;max-height:280px;overflow:auto;border-radius:6px}.pill{padding:3px 7px;border-radius:12px;background:#28435d}label{display:block;margin:5px 0}</style><main><h1>Quake 3 Control</h1><p>Private Tailscale dashboard · Server-local RCON</p><div class=grid><section class=card><h2>Live server</h2><div id=summary>Loading…</div><button onclick=refresh()>Refresh status</button><button onclick=post('/api/v1/maps/restart',{})>Restart map (5s)</button><h3>Players</h3><div id=players></div></section><section class=card><h2>Map & mode</h2><label>Map <select id=map></select></label><label>Mode <select id=mode><option value=0>Free For All</option><option value=1>Tournament</option><option value=3>Team Deathmatch</option><option value=4>Capture the Flag</option></select></label><button onclick=loadMap()>Load map</button><h3>Announcement</h3><input id=msg maxlength=140 placeholder="Message to all players"><button onclick=announce()>Send</button></section><section class=card><h2>Bot director</h2><label>Human team <select id=team><option>red</option><option>blue</option></select></label><label>Bots/team <input id=bots type=number min=0 max=8></label><label>Base skill <input id=skill type=number min=1 max=5></label><label><input id=adaptive type=checkbox> adaptive next-round policy</label><button onclick=savePolicy()>Save policy</button><button onclick=reconcile()>Rebuild bot teams</button><p><small>Rebuild is explicit: it removes/re-adds bots. Stock Q3 does not let the server forcibly move human clients without a game mod.</small></p></section><section class=card><h2>Rotation</h2><div id=rotation></div><button onclick=saveRotation()>Save rotation</button><p><small>Stored rotation is ready for next configuration apply; changing it does not interrupt the live match.</small></p></section></div><section class=card><h2>Live game log</h2><pre id=gameLog>Connecting…</pre></section><section class=card><h2>q3ctl control log</h2><pre id=auditLog>Connecting…</pre></section></main><script>const csrf='__CSRF__';let state;const $=id=>document.getElementById(id);function setBusy(button,busy){if(!button)return;button.disabled=busy;button.classList.toggle('pressed',busy);if(busy){button.dataset.label=button.textContent;button.textContent='Working…'}else if(button.dataset.label){button.textContent=button.dataset.label;delete button.dataset.label}}let activeButton=null;document.addEventListener('click',e=>{let b=e.target.closest('button');if(!b)return;activeButton=b;b.classList.add('pressed');setTimeout(()=>b.classList.remove('pressed'),180)},true);async function api(u,o={}){let h=new Headers(o.headers||{});let mutation=o.method&&o.method!=='GET';if(mutation)h.set('X-CSRF-Token',csrf);let button=mutation?activeButton:null;if(button)setBusy(button,true);try{let r=await fetch(u,{...o,headers:h});if(!r.ok)throw Error(await r.text());return r.json()}finally{if(button)setBusy(button,false)}}async function post(u,b){try{await api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});refresh()}catch(e){alert(e)}}function esc(x){return String(x).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}function modeName(x){return ({0:'FFA',1:'Tournament',3:'TDM',4:'CTF'})[x]||'Unknown'}function append(id,text){let e=$(id);e.textContent+=text+'\n';if(e.textContent.length>128000)e.textContent=e.textContent.slice(-96000);e.scrollTop=e.scrollHeight}async function refresh(){try{state=await api('/api/v1/status');let s=state.server;$('summary').innerHTML='<b>'+esc(s.map)+'</b> · '+modeName(s.gametype)+' · '+s.players.length+'/'+s.max_clients+' players';$('players').innerHTML=s.players.map(p=>'<div><span class=pill>'+p.id+'</span> '+esc(p.name)+' '+(p.bot?'BOT':'HUMAN')+' score '+p.score+' <button class=danger onclick="kick('+p.id+')">Kick</button></div>').join('')||'Nobody connected';$('team').value=state.policy.human_team;$('bots').value=state.policy.bots_per_team;$('skill').value=state.policy.base_skill;$('adaptive').checked=state.policy.adaptive;$('rotation').innerHTML=state.rotation.map((r,i)=>'<div>'+i+': '+r.map+' · '+modeName(r.gametype)+' · '+r.timelimit+' min</div>').join('')}catch(e){$('summary').textContent='Status unavailable: '+e}}async function kick(id){if(confirm('Kick client '+id+'?'))await post('/api/v1/players/kick',{id})}async function loadMap(){if(confirm('Load selected map now?'))await post('/api/v1/maps/load',{map:$('map').value,gametype:+$('mode').value})}async function announce(){await post('/api/v1/announce',{message:$('msg').value});$('msg').value=''}async function savePolicy(){let p={...state.policy,human_team:$('team').value,bots_per_team:+$('bots').value,base_skill:+$('skill').value,adaptive:$('adaptive').checked};try{await api('/api/v1/bots/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});refresh()}catch(e){alert(e)}}async function reconcile(){if(confirm('Kick and rebuild all bots on configured teams?'))await post('/api/v1/bots/reconcile',{})}async function saveRotation(){try{await api('/api/v1/rotation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(state.rotation)});alert('Rotation saved')}catch(e){alert(e)}}async function init(){let maps=await api('/api/v1/maps');$('map').innerHTML=maps.map(x=>'<option>'+x+'</option>').join('');refresh();let es=new EventSource('/api/v1/logs/stream');es.addEventListener('connected',e=>{let m='[connected] '+JSON.parse(e.data).message;$('gameLog').textContent=m+'\n';$('auditLog').textContent=m+'\n'});es.addEventListener('game',e=>append('gameLog',JSON.parse(e.data).line));es.addEventListener('audit',e=>append('auditLog',JSON.stringify(JSON.parse(e.data))));es.onerror=()=>{append('gameLog','[stream reconnecting]');append('auditLog','[stream reconnecting]')}}init()</script>`
 
 func init() { sort.Strings([]string{}) }

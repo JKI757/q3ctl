@@ -1,5 +1,6 @@
 {
   "listen": "127.0.0.1:8088",
   "rcon_addr": "127.0.0.1:27960",
-  "admin_user": "josh"
+  "admin_user": "josh",
+  "game_log_file": "/usr/lib/ioquake3/baseq3/q3games.log"
 }
