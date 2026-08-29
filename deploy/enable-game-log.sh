@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Enable ioquake3's server-side game event log for q3ctl to tail.
 # This updates only g_log/g_logsync, makes a dated server.cfg backup, then
-# restarts quake3. Run on C62: sudo bash ./enable-game-log.sh
+# restarts the Quake service. Run as root: sudo bash ./enable-game-log.sh
 set -euo pipefail
 
 config=/usr/lib/ioquake3/baseq3/server.cfg

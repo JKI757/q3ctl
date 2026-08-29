@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # One-time privileged deployment for q3ctl. Run interactively as root:
-#   sudo /home/josh/q3ctl-staging/install-q3ctl.sh
+#   sudo STAGE=/path/to/q3ctl-staging ./install-q3ctl.sh
 set -euo pipefail
 
-STAGE=/home/josh/q3ctl-staging
+STAGE=${STAGE:-"$(cd "$(dirname "$0")/.." && pwd)"}
 GAME=/usr/lib/ioquake3/baseq3
 install -d -m 0750 -o root -g q3ctl /etc/q3ctl 2>/dev/null || true
 if ! id q3ctl >/dev/null 2>&1; then

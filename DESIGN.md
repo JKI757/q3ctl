@@ -2,7 +2,7 @@
 
 ## Goal
 
-A self-hosted authenticated dashboard and JSON API for the C62 Quake 3 server. It manages **only** declared game-server operations; it is not a remote shell and it never exposes Quake 3's plaintext UDP RCON on the public Internet.
+A self-hosted authenticated dashboard and JSON API for a Quake 3 server. It manages **only** declared game-server operations; it is not a remote shell and it never exposes Quake 3's plaintext UDP RCON on the public Internet.
 
 ## Deployment topology
 
@@ -26,7 +26,7 @@ flowchart LR
 
 1. **No public RCON and no public dashboard listener.** RCON puts its password on the wire.
 2. q3ctl gets a long random admin password and RCON password from a root-owned environment file (`0640`, group `q3ctl`).
-3. The existing `josh`-owned passwordless-sudo script must be removed before q3ctl deployment. A user-writable script authorized by sudo is equivalent to full root.
+3. Any user-writable passwordless-sudo script must be removed before q3ctl deployment. A user-writable script authorized by sudo is equivalent to full root.
 4. API is authenticated; future production UI adds CSRF protection and rate limiting before any Internet-facing proxy is considered.
 5. Operations are allowlisted and structured. There is no arbitrary RCON text box in the production dashboard.
 6. Audit every mutating request: authenticated principal, request, result, and correlation ID—never passwords.

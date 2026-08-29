@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Upgrade q3ctl from its signed-by-checksum GitHub release asset.
-# Run on C62: sudo bash /home/josh/upgrade-q3ctl.sh
+# Run as root: sudo bash ./upgrade-q3ctl.sh [version]
 set -euo pipefail
 
 repo="JKI757/q3ctl"
-version="${1:-v0.2.4}"
+version="${1:-v0.2.5}"
 arch="linux-amd64"
 base="https://github.com/${repo}/releases/download/${version}"
 tmp="$(mktemp -d)"
@@ -27,7 +27,8 @@ if [[ -z "$expected" || "$expected" != "$actual" ]]; then
 fi
 
 install -m 0755 -o root -g root "$tmp/q3ctl" /usr/local/bin/q3ctl
-install -m 0644 -o root -g root /home/josh/q3ctl-release/q3ctl.service /etc/systemd/system/q3ctl.service 2>/dev/null || true
+# A locally staged service-unit override is optional; deployments normally
+# retain the existing unit to avoid silently changing sandbox policy.
 systemctl daemon-reload
 systemctl restart q3ctl.service
 systemctl is-active --quiet q3ctl.service

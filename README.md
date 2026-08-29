@@ -20,7 +20,7 @@ internal/config/  non-secret runtime configuration
 internal/rcon/    bounded UDP RCON client
 internal/store/   atomic state persistence
 pkg/q3/           reusable validated Quake domain types and rotation renderer
-deploy/            systemd and C62 deployment scripts
+deploy/            systemd and deployment scripts
 ```
 
 ## Security model
@@ -47,7 +47,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dis
 {
   "listen": "127.0.0.1:8088",
   "rcon_addr": "127.0.0.1:27960",
-  "admin_user": "josh",
+  "admin_user": "admin",
   "state_file": "/var/lib/q3ctl/state.json",
   "audit_file": "/var/log/q3ctl/audit.jsonl",
   "game_log_file": "/var/log/q3ctl/game.log"

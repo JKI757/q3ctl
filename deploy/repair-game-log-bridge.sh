@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Make ioquake3 game events visible to q3ctl without weakening q3ctl's
-# ProtectHome sandbox. Run on C62 as: sudo bash repair-game-log-bridge.sh
+# ProtectHome sandbox. Run as root: sudo bash repair-game-log-bridge.sh
 set -euo pipefail
 
 quake_cfg=/usr/lib/ioquake3/baseq3/server.cfg
