@@ -1,0 +1,21 @@
+[Unit]
+Description=q3ctl Quake 3 control plane
+After=network-online.target quake3.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=q3ctl
+Group=q3ctl
+EnvironmentFile=/etc/q3ctl/q3ctl.env
+ExecStart=/usr/local/bin/q3ctl -config /etc/q3ctl/config.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/q3ctl /var/log/q3ctl
+
+[Install]
+WantedBy=multi-user.target
