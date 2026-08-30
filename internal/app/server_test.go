@@ -21,18 +21,14 @@ num score ping name            address               rate
 	}
 }
 
-func TestParseQuotedCVar(t *testing.T) {
-	for _, tc := range []struct {
-		raw, name, want string
-	}{
-		{`mapname is:"actf01^7" default:""`, "mapname", "actf01"},
-		{`g_gametype is:"4^7" default:"0"`, "g_gametype", "4"},
-		{`g_gametype is "3" default: "0"`, "mapname", ""},
-		{`mapname is `, "mapname", ""},
-	} {
-		if got := parseQuotedCVar(tc.raw, tc.name); got != tc.want {
-			t.Errorf("parseQuotedCVar(%q, %q) = %q, want %q", tc.raw, tc.name, got, tc.want)
-		}
+func TestParseInfoString(t *testing.T) {
+	info := parseInfoString(`statusResponse
+\mapname\q3ctf1\g_gametype\4\sv_hostname	est`)
+	if info["mapname"] != "q3ctf1" || info["g_gametype"] != "4" {
+		t.Fatalf("unexpected info string: %#v", info)
+	}
+	if got := parseInfoString("statusResponse\nno info here"); got != nil {
+		t.Fatalf("got %#v, want nil", got)
 	}
 }
 

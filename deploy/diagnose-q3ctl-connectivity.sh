@@ -58,44 +58,32 @@ else:
     print("server.cfg RCON password: MISMATCH with q3ctl environment")
 PY
 
-# ioquake3 builds differ in how much state the `status` reply includes. Probe
-# the public cvars individually, which is also what q3ctl uses for live state.
-# No player rows or credential material are emitted.
-python3 - "$rcon_addr" "$Q3CTL_RCON_PASSWORD" <<'PY'
-import re, socket, sys
-address, password = sys.argv[1:]
+# `getstatus` is Quake's standard game-client status protocol. Unlike RCON
+# `status`/cvar text, its server-info response has a stable info-string shape.
+# It contains no credentials and no player rows are printed here.
+python3 - "$rcon_addr" <<'PY'
+import socket, sys
+address = sys.argv[1]
 host, port = address.rsplit(':', 1)
-
-def rcon(command):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(5)
-    try:
-        packet = b'\xff\xff\xff\xffrcon ' + password.encode() + b' ' + command.encode() + b'\n'
-        sock.sendto(packet, (host, int(port)))
-        return sock.recvfrom(65535)[0].decode("utf-8", "replace").replace("\ufffd", "")
-    finally:
-        sock.close()
-
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(5)
 try:
-    map_reply = rcon("mapname")
-    type_reply = rcon("g_gametype")
+    sock.sendto(b'\xff\xff\xff\xffgetstatus\n', (host, int(port)))
+    raw = sock.recvfrom(65535)[0].decode("utf-8", "replace").replace("\ufffd", "")
 except OSError as exc:
-    print(f"direct RCON status: FAILED ({exc})")
+    print(f"direct Quake status: FAILED ({exc})")
     raise SystemExit(1)
-if "Bad rconpassword" in map_reply or "Bad rconpassword" in type_reply:
-    print("direct RCON status: FAILED (Quake rejected the configured password)")
-    raise SystemExit(1)
-
-def cvar(reply, name):
-    match = re.search(r"(?:^|\n)\s*" + re.escape(name) + r'\s+is\s*:?\s*"([^"]*)"', reply)
-    return re.sub(r"\^.", "", match.group(1)) if match else ""
-
-map_name = cvar(map_reply, "mapname")
-game_type = cvar(type_reply, "g_gametype")
+finally:
+    sock.close()
+info = next((line for line in raw.splitlines() if line.startswith("\\")), "")
+fields = info.strip("\\").split("\\")
+cvars = dict(zip(fields[::2], fields[1::2]))
+map_name = cvars.get("mapname", "")
+game_type = cvars.get("g_gametype", "")
 if not map_name or not game_type:
-    print("direct RCON status: FAILED (mapname/g_gametype reply was not understood)")
+    print("direct Quake status: FAILED (getstatus reply lacked mapname/g_gametype)")
     raise SystemExit(1)
-print(f"direct RCON status: OK (map={map_name} gametype={game_type})")
+print(f"direct Quake status: OK (map={map_name} gametype={game_type})")
 PY
 
 # Test the q3ctl API with the configured credentials; do not print credentials.

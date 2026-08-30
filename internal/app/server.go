@@ -228,13 +228,19 @@ func stripQ3Colors(s string) string {
 	}
 	return b.String()
 }
-func parseQuotedCVar(raw, name string) string {
-	pattern := `(?m)^\s*` + regexp.QuoteMeta(name) + `\s+is\s*:?\s*"([^"]*)"`
-	matches := regexp.MustCompile(pattern).FindStringSubmatch(strings.ReplaceAll(raw, "\r", ""))
-	if len(matches) != 2 {
-		return ""
+func parseInfoString(raw string) map[string]string {
+	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r", ""), "\n") {
+		if !strings.HasPrefix(line, "\\") {
+			continue
+		}
+		fields := strings.Split(strings.TrimPrefix(line, "\\"), "\\")
+		values := map[string]string{}
+		for i := 0; i+1 < len(fields); i += 2 {
+			values[fields[i]] = fields[i+1]
+		}
+		return values
 	}
-	return stripQ3Colors(matches[1])
+	return nil
 }
 
 func (s *server) live() (Status, error) {
@@ -244,26 +250,24 @@ func (s *server) live() (Status, error) {
 	}
 	st := parseStatus(raw)
 
-	// The `status` envelope varies across ioquake3 distributions. The player
-	// table is stable enough to parse, but map/mode cvars are not guaranteed to
-	// be included. Query the public cvars directly so the dashboard and map-load
-	// confirmation use the running game's actual state.
-	mapReply, err := s.rcon("mapname")
+	// Quake's authenticated `status` response is retained for the player table.
+	// Its cvar representation varies across ioquake3 builds, so use the stable
+	// standard getstatus info string for the running map and game mode.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	serverInfo, err := (rcon.Client{Address: s.cfg.RCONAddr}).GetStatus(ctx)
 	if err != nil {
 		return Status{}, err
 	}
-	st.Map = parseQuotedCVar(mapReply, "mapname")
-	if st.Map == "" {
-		return Status{}, errors.New("Quake RCON mapname reply was not understood")
+	values := parseInfoString(serverInfo)
+	if values == nil || values["mapname"] == "" {
+		return Status{}, errors.New("Quake getstatus reply was not understood")
 	}
-	gameTypeReply, err := s.rcon("g_gametype")
+	gameType, err := strconv.Atoi(values["g_gametype"])
 	if err != nil {
-		return Status{}, err
+		return Status{}, errors.New("Quake getstatus g_gametype was not understood")
 	}
-	gameType, err := strconv.Atoi(parseQuotedCVar(gameTypeReply, "g_gametype"))
-	if err != nil {
-		return Status{}, errors.New("Quake RCON g_gametype reply was not understood")
-	}
+	st.Map = values["mapname"]
 	st.GameType = gameType
 	return st, nil
 }
