@@ -65,8 +65,19 @@ func (r Rotation) NextMapCommands() (string, error) {
 }
 
 func (r Rotation) NextMapCommandsWithMaps(maps []string) (string, error) {
-	if err := r.ValidateWithMaps(maps); err != nil {
+	commands, err := r.NextMapCommandListWithMaps(maps)
+	if err != nil {
 		return "", err
+	}
+	return strings.Join(commands, "; "), nil
+}
+
+// NextMapCommandListWithMaps returns independently executable RCON commands.
+// Sending these separately avoids a server command-buffer truncation leaving a
+// rotation partly installed when it contains many map entries.
+func (r Rotation) NextMapCommandListWithMaps(maps []string) ([]string, error) {
+	if err := r.ValidateWithMaps(maps); err != nil {
+		return nil, err
 	}
 	commands := make([]string, 0, len(r)+1)
 	for i, entry := range r {
@@ -76,8 +87,7 @@ func (r Rotation) NextMapCommandsWithMaps(maps []string) (string, error) {
 		}
 		commands = append(commands, "set d"+itoa(i+1)+" \"set g_gametype "+itoa(entry.GameType)+"; set fraglimit "+itoa(entry.FragLimit)+"; set capturelimit "+itoa(entry.CaptureLimit)+"; set timelimit "+itoa(entry.TimeLimit)+"; map "+entry.Map+"; set nextmap vstr d"+itoa(next)+"\"")
 	}
-	commands = append(commands, "set nextmap vstr d1")
-	return strings.Join(commands, "; "), nil
+	return append(commands, "set nextmap vstr d1"), nil
 }
 
 func itoa(n int) string {

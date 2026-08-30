@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo="JKI757/q3ctl"
-version="${1:-v0.2.7}"
+version="${1:-v0.2.8}"
 arch="linux-amd64"
 base="https://github.com/${repo}/releases/download/${version}"
 tmp="$(mktemp -d)"

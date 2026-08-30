@@ -28,6 +28,20 @@ func TestRotationNextMapCommands(t *testing.T) {
 	}
 }
 
+func TestRotationCommandList(t *testing.T) {
+	rotation := Rotation{
+		{Map: "q3ctf1", GameType: GameTypeCTF, TimeLimit: 20, CaptureLimit: 8},
+		{Map: "q3dm17", GameType: GameTypeTDM, TimeLimit: 15, FragLimit: 40},
+	}
+	commands, err := rotation.NextMapCommandListWithMaps([]string{"q3ctf1", "q3dm17"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 3 || !strings.Contains(commands[0], "set d1") || !strings.Contains(commands[1], "set d2") || commands[2] != "set nextmap vstr d1" {
+		t.Fatalf("unexpected command list: %#v", commands)
+	}
+}
+
 func TestRotationRejectsUnsafeEntries(t *testing.T) {
 	if err := (Rotation{{Map: `q3ctf1; quit`, GameType: GameTypeCTF}}).Validate(); err == nil {
 		t.Fatal("unsafe map accepted")

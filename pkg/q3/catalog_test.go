@@ -8,6 +8,69 @@ import (
 	"testing"
 )
 
+func TestDiscoverCatalogReadsMapsAndArenaGameTypes(t *testing.T) {
+	base := t.TempDir()
+	archivePath := filepath.Join(base, "custom.pk3")
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(archive)
+	files := map[string]string{
+		"maps/ospctf1.bsp": "fixture",
+		"maps/ospdm1.bsp":  "fixture",
+		"maps/unknown.bsp": "fixture",
+		"scripts/custom.arena": `{
+map "ospctf1"
+type "ctf team"
+}
+{
+map ospdm1
+type ffa team
+}`,
+	}
+	for name, body := range files {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog, err := DiscoverCatalog(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []MapInfo{
+		{Name: "ospctf1", GameTypes: []int{GameTypeTDM, GameTypeCTF}},
+		{Name: "ospdm1", GameTypes: []int{GameTypeFFA, GameTypeTDM}},
+		{Name: "unknown", GameTypes: nil},
+	}
+	if !reflect.DeepEqual(catalog, want) {
+		t.Fatalf("DiscoverCatalog() = %#v, want %#v", catalog, want)
+	}
+}
+
+func TestLegacyModeInferenceIsNarrow(t *testing.T) {
+	if got := inferredGameTypes("actf01"); !reflect.DeepEqual(got, []int{GameTypeCTF}) {
+		t.Fatalf("actf01 modes = %#v", got)
+	}
+	if got := inferredGameTypes("batcula"); !reflect.DeepEqual(got, []int{GameTypeTDM}) {
+		t.Fatalf("batcula modes = %#v", got)
+	}
+	if got := inferredGameTypes("unknown"); got != nil {
+		t.Fatalf("unknown modes = %#v, want nil", got)
+	}
+}
+
 func TestDiscoverMapsFromPackagesAndDirectories(t *testing.T) {
 	base := t.TempDir()
 	archivePath := filepath.Join(base, "custom.pk3")
