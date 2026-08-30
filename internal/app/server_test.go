@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"q3ctl/internal/config"
 	"q3ctl/pkg/q3"
@@ -138,6 +139,24 @@ func TestIsTimeout(t *testing.T) {
 	}
 	if isTimeout(&net.DNSError{}) {
 		t.Fatal("unexpected timeout recognition")
+	}
+}
+
+func TestCachedGameType(t *testing.T) {
+	s := New(config.Config{})
+	s.mu.Lock()
+	s.lastGameType, s.lastGameAt = q3.GameTypeCTF, time.Now()
+	got, ok := s.cachedGameTypeLocked(time.Now())
+	s.mu.Unlock()
+	if !ok || got != q3.GameTypeCTF {
+		t.Fatalf("fresh cached game type = %d, %v", got, ok)
+	}
+	s.mu.Lock()
+	s.lastGameAt = time.Now().Add(-2 * time.Minute)
+	_, ok = s.cachedGameTypeLocked(time.Now())
+	s.mu.Unlock()
+	if ok {
+		t.Fatal("stale cached game type was accepted")
 	}
 }
 

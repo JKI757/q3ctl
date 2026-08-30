@@ -95,6 +95,8 @@ type server struct {
 	csrfToken    string
 	mapCatalog   []q3.MapInfo
 	mapCatalogAt time.Time
+	lastGameType int
+	lastGameAt   time.Time
 }
 
 func defaults() Persisted {
@@ -205,6 +207,22 @@ func (s *server) rconFor(command string, timeout time.Duration) (string, error) 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	reply, err := (rcon.Client{Address: s.cfg.RCONAddr, Password: s.cfg.RCONPassword}).Execute(ctx, command)
+	s.rconLast = time.Now()
+	return reply, err
+}
+
+// getStatusOnce shares the connectionless packet gate with RCON. ioquake3
+// limits both request classes by source IP, so an overlapping dashboard refresh
+// must not inject a getstatus packet in the middle of a policy application.
+func (s *server) getStatusOnce(timeout time.Duration) (string, error) {
+	s.rconMu.Lock()
+	defer s.rconMu.Unlock()
+	if wait := 300*time.Millisecond - time.Since(s.rconLast); wait > 0 {
+		time.Sleep(wait)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	reply, err := (rcon.Client{Address: s.cfg.RCONAddr}).GetStatus(ctx)
 	s.rconLast = time.Now()
 	return reply, err
 }
@@ -424,8 +442,54 @@ func (s *server) live() (Status, error) {
 	}
 	st.Map = values["mapname"]
 	st.GameType = gameType
+	s.rememberGameType(gameType)
 	s.populateTeamsFromGameLog(&st)
 	return st, nil
+}
+
+func (s *server) rememberGameType(gameType int) {
+	if !validGameType(gameType) {
+		return
+	}
+	s.mu.Lock()
+	s.lastGameType, s.lastGameAt = gameType, time.Now()
+	s.mu.Unlock()
+}
+
+// cachedGameTypeLocked requires s.mu to be held by the caller.
+func (s *server) cachedGameTypeLocked(now time.Time) (int, bool) {
+	return s.lastGameType, validGameType(s.lastGameType) && now.Sub(s.lastGameAt) < 2*time.Minute
+}
+
+// botGameType avoids making Save & apply depend on a second unauthenticated
+// status request. The authenticated RCON status response is sufficient when it
+// carries g_gametype; otherwise use a recent, previously confirmed live mode.
+// Only a cold controller with no usable RCON/cached mode needs getstatus.
+func (s *server) botGameType() (int, error) {
+	st, err := s.roster()
+	if err != nil {
+		return 0, err
+	}
+	if validGameType(st.GameType) && strings.Contains(st.Raw, `\g_gametype\`) {
+		return st.GameType, nil
+	}
+	s.mu.RLock()
+	gameType, ok := s.cachedGameTypeLocked(time.Now())
+	s.mu.RUnlock()
+	if ok {
+		return gameType, nil
+	}
+	raw, err := s.getStatusInfo()
+	if err != nil {
+		return 0, err
+	}
+	values := parseInfoString(raw)
+	gameType, err = strconv.Atoi(values["g_gametype"])
+	if err != nil || !validGameType(gameType) {
+		return 0, errors.New("Quake gametype was not understood")
+	}
+	s.rememberGameType(gameType)
+	return gameType, nil
 }
 
 // populateTeamsFromGameLog reads the game VM's authoritative player
@@ -479,9 +543,7 @@ func teamDataComplete(st Status) bool {
 func (s *server) getStatusInfo() (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		raw, err := (rcon.Client{Address: s.cfg.RCONAddr}).GetStatus(ctx)
-		cancel()
+		raw, err := s.getStatusOnce(2 * time.Second)
 		if err == nil {
 			return raw, nil
 		}
@@ -604,11 +666,11 @@ func validatePolicy(p BotPolicy) error {
 	return nil
 }
 func (s *server) rebuildBots(p BotPolicy) (BotCounts, error) {
-	current, err := s.live()
+	gameType, err := s.botGameType()
 	if err != nil {
-		return BotCounts{}, fmt.Errorf("could not read live Quake state: %w", err)
+		return BotCounts{}, fmt.Errorf("could not determine live Quake mode: %w", err)
 	}
-	if current.GameType != q3.GameTypeTDM && current.GameType != q3.GameTypeCTF {
+	if gameType != q3.GameTypeTDM && gameType != q3.GameTypeCTF {
 		return BotCounts{}, errors.New("bot director requires Team Deathmatch or Capture the Flag")
 	}
 	if err := s.rconAllowTimeout("set bot_minplayers 0"); err != nil {
