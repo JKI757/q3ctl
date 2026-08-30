@@ -30,7 +30,8 @@ def rcon(command):
         s.sendto(b'\xff\xff\xff\xffrcon ' + password.encode() + b' ' + command.encode() + b'\n', (host, port))
         return s.recvfrom(16384)[0].decode('utf-8', 'replace').replace('\xff\xff\xff\xffprint\n', '', 1)
 print('before:', rcon('status').splitlines()[0])
-print('load reply:', rcon(f'set g_gametype {game_type}; map {map_name}').strip())
+print('mode reply:', rcon(f'set g_gametype {game_type}').strip())
+print('map reply:', rcon(f'map {map_name}').strip())
 for _ in range(12):
     time.sleep(.25)
     first = rcon('status').splitlines()[0]
