@@ -25,9 +25,8 @@ func TestParseQuotedCVar(t *testing.T) {
 	for _, tc := range []struct {
 		raw, name, want string
 	}{
-		{`mapname is "actf01" default: ""`, "mapname", "actf01"},
-		{`print
- g_gametype is "4"`, "g_gametype", "4"},
+		{`mapname is:"actf01^7" default:""`, "mapname", "actf01"},
+		{`g_gametype is:"4^7" default:"0"`, "g_gametype", "4"},
 		{`g_gametype is "3" default: "0"`, "mapname", ""},
 		{`mapname is `, "mapname", ""},
 	} {

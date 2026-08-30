@@ -229,17 +229,12 @@ func stripQ3Colors(s string) string {
 	return b.String()
 }
 func parseQuotedCVar(raw, name string) string {
-	prefix := name + ` is "`
-	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r", ""), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		value := strings.TrimPrefix(line, prefix)
-		value, _, _ = strings.Cut(value, `"`)
-		return value
+	pattern := `(?m)^\s*` + regexp.QuoteMeta(name) + `\s+is\s*:?\s*"([^"]*)"`
+	matches := regexp.MustCompile(pattern).FindStringSubmatch(strings.ReplaceAll(raw, "\r", ""))
+	if len(matches) != 2 {
+		return ""
 	}
-	return ""
+	return stripQ3Colors(matches[1])
 }
 
 func (s *server) live() (Status, error) {
