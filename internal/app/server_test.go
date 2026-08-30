@@ -5,6 +5,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"q3ctl/internal/config"
+	"q3ctl/pkg/q3"
 )
 
 func TestParseStatus(t *testing.T) {
@@ -123,6 +126,23 @@ func TestIsTimeout(t *testing.T) {
 	}
 	if isTimeout(&net.DNSError{}) {
 		t.Fatal("unexpected timeout recognition")
+	}
+}
+
+func TestPopulateTeamsFromGameLog(t *testing.T) {
+	path := t.TempDir() + "/game.log"
+	sep := string('\\')
+	log := "0:01 ClientUserinfoChanged: 2 " + strings.Join([]string{"n", "Sarge", "t", "1", "model", "sarge/default"}, sep) + "\n" +
+		"0:02 ClientUserinfoChanged: 7 " + strings.Join([]string{"n", "Player", "t", "2", "model", "sarge/default"}, sep) + "\n" +
+		"0:03 ClientUserinfoChanged: 2 " + strings.Join([]string{"n", "Sarge", "t", "2", "model", "sarge/default"}, sep) + "\n"
+	if err := os.WriteFile(path, []byte(log), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(config.Config{GameLogFile: path})
+	st := Status{GameType: q3.GameTypeTDM, Players: []Player{{ID: 2}, {ID: 7}}}
+	s.populateTeamsFromGameLog(&st)
+	if st.Players[0].Team != "blue" || st.Players[1].Team != "blue" || !teamDataComplete(st) {
+		t.Fatalf("unexpected logged teams: %#v", st)
 	}
 }
 
