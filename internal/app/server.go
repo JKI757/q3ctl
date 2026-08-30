@@ -440,16 +440,31 @@ func (s *server) loadMap(w http.ResponseWriter, r *http.Request) {
 	}
 	maps, mapsErr := s.availableMaps()
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&in) != nil || mapsErr != nil || !q3.ContainsMap(maps, in.Map) || !validGameType(in.GameType) {
-		http.Error(w, "invalid map or gametype", 400)
+		http.Error(w, "invalid map or gametype", http.StatusBadRequest)
 		return
 	}
-	_, e := s.rcon(fmt.Sprintf("set g_gametype %d; map %s", in.GameType, in.Map))
-	if e != nil {
-		http.Error(w, e.Error(), 502)
+
+	// Quake can acknowledge an RCON datagram even when the command later fails
+	// (for example, a bad asset or an ignored command buffer). Do not report a
+	// successful load until a fresh status query observes the requested map.
+	if _, err := s.rcon(fmt.Sprintf("set g_gametype %d; map %s", in.GameType, in.Map)); err != nil {
+		s.record("map_load", fmt.Sprintf("%s type=%d", in.Map, in.GameType), err.Error())
+		http.Error(w, "could not send map load: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.record("map_load", fmt.Sprintf("%s type=%d", in.Map, in.GameType), "ok")
-	out(w, map[string]bool{"ok": true})
+	const attempts = 12
+	for attempt := 0; attempt < attempts; attempt++ {
+		time.Sleep(250 * time.Millisecond)
+		status, err := s.live()
+		if err == nil && status.Map == in.Map && status.GameType == in.GameType {
+			s.record("map_load", fmt.Sprintf("%s type=%d", in.Map, in.GameType), "confirmed")
+			out(w, map[string]any{"ok": true, "map": status.Map, "gametype": status.GameType})
+			return
+		}
+	}
+	detail := fmt.Sprintf("%s type=%d was not observed after RCON command", in.Map, in.GameType)
+	s.record("map_load", detail, "unconfirmed")
+	http.Error(w, detail, http.StatusBadGateway)
 }
 
 func (s *server) restartMap(w http.ResponseWriter, r *http.Request) {
