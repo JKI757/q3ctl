@@ -58,36 +58,44 @@ else:
     print("server.cfg RCON password: MISMATCH with q3ctl environment")
 PY
 
-# Direct RCON test. Only response metadata and public status cvars are emitted.
+# ioquake3 builds differ in how much state the `status` reply includes. Probe
+# the public cvars individually, which is also what q3ctl uses for live state.
+# No player rows or credential material are emitted.
 python3 - "$rcon_addr" "$Q3CTL_RCON_PASSWORD" <<'PY'
-import socket, sys
+import re, socket, sys
 address, password = sys.argv[1:]
 host, port = address.rsplit(':', 1)
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.settimeout(5)
+
+def rcon(command):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(5)
+    try:
+        packet = b'\xff\xff\xff\xffrcon ' + password.encode() + b' ' + command.encode() + b'\n'
+        sock.sendto(packet, (host, int(port)))
+        return sock.recvfrom(65535)[0].decode("utf-8", "replace").replace("\ufffd", "")
+    finally:
+        sock.close()
+
 try:
-    packet = b'\xff\xff\xff\xffrcon ' + password.encode() + b' status\n'
-    sock.sendto(packet, (host, int(port)))
-    raw, _ = sock.recvfrom(65535)
+    map_reply = rcon("mapname")
+    type_reply = rcon("g_gametype")
 except OSError as exc:
     print(f"direct RCON status: FAILED ({exc})")
     raise SystemExit(1)
-finally:
-    sock.close()
-text = raw.decode("utf-8", "replace").replace("\ufffd", "")
-if "Bad rconpassword" in text:
+if "Bad rconpassword" in map_reply or "Bad rconpassword" in type_reply:
     print("direct RCON status: FAILED (Quake rejected the configured password)")
     raise SystemExit(1)
-# Quake's public status cvars appear on the line after its `print` envelope.
-# Report just map/mode rather than raw player addresses or any credential material.
-cvar_line = next((line for line in text.splitlines() if "\\\\mapname\\\\" in line), "")
-fields = cvar_line.strip().strip("\\\\").split("\\\\")
-cvars = dict(zip(fields[::2], fields[1::2]))
-if not cvars.get("mapname"):
-    print("direct RCON status: FAILED (reply lacked mapname)")
+
+def cvar(reply, name):
+    match = re.search(r"(?:^|\\n)\\s*" + re.escape(name) + r'\\s+is\\s+"([^"]*)"', reply)
+    return match.group(1) if match else ""
+
+map_name = cvar(map_reply, "mapname")
+game_type = cvar(type_reply, "g_gametype")
+if not map_name or not game_type:
+    print("direct RCON status: FAILED (mapname/g_gametype reply was not understood)")
     raise SystemExit(1)
-print("direct RCON status: OK (map=%s gametype=%s)" % (
-    cvars["mapname"], cvars.get("g_gametype", "unknown")))
+print(f"direct RCON status: OK (map={map_name} gametype={game_type})")
 PY
 
 # Test the q3ctl API with the configured credentials; do not print credentials.

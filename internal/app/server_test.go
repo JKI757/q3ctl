@@ -21,6 +21,22 @@ num score ping name            address               rate
 	}
 }
 
+func TestParseQuotedCVar(t *testing.T) {
+	for _, tc := range []struct {
+		raw, name, want string
+	}{
+		{`mapname is "actf01" default: ""`, "mapname", "actf01"},
+		{`print
+ g_gametype is "4"`, "g_gametype", "4"},
+		{`g_gametype is "3" default: "0"`, "mapname", ""},
+		{`mapname is `, "mapname", ""},
+	} {
+		if got := parseQuotedCVar(tc.raw, tc.name); got != tc.want {
+			t.Errorf("parseQuotedCVar(%q, %q) = %q, want %q", tc.raw, tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestStripQ3Colors(t *testing.T) {
 	if got := stripQ3Colors("^1A^2n^3a^4r^5k^6i"); got != "Anarki" {
 		t.Fatalf("got %q, want Anarki", got)

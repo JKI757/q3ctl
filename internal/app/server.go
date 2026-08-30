@@ -228,12 +228,49 @@ func stripQ3Colors(s string) string {
 	}
 	return b.String()
 }
-func (s *server) live() (Status, error) {
-	raw, e := s.rcon("status")
-	if e != nil {
-		return Status{}, e
+func parseQuotedCVar(raw, name string) string {
+	prefix := name + ` is "`
+	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r", ""), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		value := strings.TrimPrefix(line, prefix)
+		value, _, _ = strings.Cut(value, `"`)
+		return value
 	}
-	return parseStatus(raw), nil
+	return ""
+}
+
+func (s *server) live() (Status, error) {
+	raw, err := s.rcon("status")
+	if err != nil {
+		return Status{}, err
+	}
+	st := parseStatus(raw)
+
+	// The `status` envelope varies across ioquake3 distributions. The player
+	// table is stable enough to parse, but map/mode cvars are not guaranteed to
+	// be included. Query the public cvars directly so the dashboard and map-load
+	// confirmation use the running game's actual state.
+	mapReply, err := s.rcon("mapname")
+	if err != nil {
+		return Status{}, err
+	}
+	st.Map = parseQuotedCVar(mapReply, "mapname")
+	if st.Map == "" {
+		return Status{}, errors.New("Quake RCON mapname reply was not understood")
+	}
+	gameTypeReply, err := s.rcon("g_gametype")
+	if err != nil {
+		return Status{}, err
+	}
+	gameType, err := strconv.Atoi(parseQuotedCVar(gameTypeReply, "g_gametype"))
+	if err != nil {
+		return Status{}, errors.New("Quake RCON g_gametype reply was not understood")
+	}
+	st.GameType = gameType
+	return st, nil
 }
 func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	x, e := s.live()
