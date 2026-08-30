@@ -102,12 +102,16 @@ func DiscoverCatalog(basePath string) ([]MapInfo, error) {
 	}
 	catalog := make([]MapInfo, 0, len(found))
 	for name, types := range found {
-		info := MapInfo{Name: name}
+		// JSON should consistently expose an array. A nil slice becomes `null`,
+		// which forces every browser client to special-case unclassified maps.
+		info := MapInfo{Name: name, GameTypes: make([]int, 0, len(types))}
 		for gameType := range types {
 			info.GameTypes = append(info.GameTypes, gameType)
 		}
 		if len(info.GameTypes) == 0 {
-			info.GameTypes = inferredGameTypes(name)
+			if inferred := inferredGameTypes(name); inferred != nil {
+				info.GameTypes = inferred
+			}
 		}
 		sort.Ints(info.GameTypes)
 		catalog = append(catalog, info)

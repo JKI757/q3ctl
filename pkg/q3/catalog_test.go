@@ -2,9 +2,11 @@ package q3
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -52,10 +54,17 @@ type ffa team
 	want := []MapInfo{
 		{Name: "ospctf1", GameTypes: []int{GameTypeTDM, GameTypeCTF}},
 		{Name: "ospdm1", GameTypes: []int{GameTypeFFA, GameTypeTDM}},
-		{Name: "unknown", GameTypes: nil},
+		{Name: "unknown", GameTypes: []int{}},
 	}
 	if !reflect.DeepEqual(catalog, want) {
 		t.Fatalf("DiscoverCatalog() = %#v, want %#v", catalog, want)
+	}
+	encoded, err := json.Marshal(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"gametypes":null`) {
+		t.Fatalf("catalog JSON contains null gametypes: %s", encoded)
 	}
 }
 
