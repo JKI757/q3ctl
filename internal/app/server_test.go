@@ -1,7 +1,9 @@
 package app
 
 import (
+	"net"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +70,49 @@ func TestValidatePolicy(t *testing.T) {
 	p.HumanTeam = "green"
 	if err := validatePolicy(p); err == nil {
 		t.Fatal("expected invalid team")
+	}
+	p = defaults().Policy
+	p.BotsPerTeam = 5
+	if err := validatePolicy(p); err == nil {
+		t.Fatal("expected target beyond roster to be rejected")
+	}
+}
+
+func TestTeamNameFromUserInfo(t *testing.T) {
+	sep := string('\\')
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{"userinfo\n--------\n" + strings.Join([]string{"", "name", "Sarge", "t", "1", "skill", "3"}, sep), "red"},
+		{strings.Join([]string{"", "name", "Hunter", "t", "2"}, sep), "blue"},
+		{strings.Join([]string{"", "name", "Spec", "t", "3"}, sep), "spectator"},
+		{"no info", ""},
+	} {
+		if got := teamNameFromUserInfo(tc.raw); got != tc.want {
+			t.Errorf("teamNameFromUserInfo(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestBotCounts(t *testing.T) {
+	counts := botCounts([]Player{
+		{Name: "Sarge", Bot: true, Team: "red"},
+		{Name: "Hunter", Bot: true, Team: "blue"},
+		{Name: "Major", Bot: true, Team: "red"},
+		{Name: "Joshua", Bot: false, Team: "red"},
+	}, 2)
+	if counts.TargetPerTeam != 2 || counts.Total != 3 || counts.Red != 2 || counts.Blue != 1 {
+		t.Fatalf("unexpected bot counts: %#v", counts)
+	}
+}
+
+func TestIsTimeout(t *testing.T) {
+	if !isTimeout(&net.DNSError{IsTimeout: true}) {
+		t.Fatal("expected timeout to be recognized")
+	}
+	if isTimeout(&net.DNSError{}) {
+		t.Fatal("unexpected timeout recognition")
 	}
 }
 
