@@ -32,13 +32,20 @@ def rcon(command):
 print('before:', rcon('status').splitlines()[0])
 print('mode reply:', rcon(f'set g_gametype {game_type}').strip())
 print('map reply:', rcon(f'map {map_name}').strip())
-for _ in range(12):
-    time.sleep(.25)
-    first = rcon('status').splitlines()[0]
+deadline = time.monotonic() + 45
+last_error = None
+while time.monotonic() < deadline:
+    time.sleep(1)
+    try:
+        first = rcon('status').splitlines()[0]
+    except (socket.timeout, TimeoutError) as exc:
+        last_error = exc
+        print('status: waiting for map initialization')
+        continue
     print('status:', first)
     if f'\\mapname\\{map_name}\\' in first and f'\\g_gametype\\{game_type}\\' in first:
         print('CONFIRMED')
         break
 else:
-    raise SystemExit('UNCONFIRMED: Quake did not report the requested map/mode')
+    raise SystemExit(f'UNCONFIRMED: Quake did not report the requested map/mode within 45 seconds ({last_error or "status mismatch"})')
 PY

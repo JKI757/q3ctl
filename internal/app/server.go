@@ -456,17 +456,26 @@ func (s *server) loadMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Quake can acknowledge an RCON datagram even when the command later fails
-	// (for example, a bad asset or an ignored command buffer). Do not report a
-	// successful load until a fresh status query observes the requested map.
-	if _, err := s.rcon(fmt.Sprintf("set g_gametype %d; map %s", in.GameType, in.Map)); err != nil {
+	// Change the mode and load separately. ioquake3 defers g_gametype changes
+	// until a restart, but map itself restarts the game; putting both in one
+	// RCON datagram can leave only the first command applied.
+	if _, err := s.rcon(fmt.Sprintf("set g_gametype %d", in.GameType)); err != nil {
+		s.record("map_load", fmt.Sprintf("%s type=%d", in.Map, in.GameType), err.Error())
+		http.Error(w, "could not set gametype: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if _, err := s.rcon("map " + in.Map); err != nil {
 		s.record("map_load", fmt.Sprintf("%s type=%d", in.Map, in.GameType), err.Error())
 		http.Error(w, "could not send map load: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	const attempts = 12
+
+	// Custom maps can pause RCON while BSP/assets and bot navigation initialize.
+	// Keep polling through temporary UDP timeouts, then require live confirmation
+	// before we report the action as successful.
+	const attempts = 30
 	for attempt := 0; attempt < attempts; attempt++ {
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(time.Second)
 		status, err := s.live()
 		if err == nil && status.Map == in.Map && status.GameType == in.GameType {
 			s.record("map_load", fmt.Sprintf("%s type=%d", in.Map, in.GameType), "confirmed")
@@ -474,7 +483,7 @@ func (s *server) loadMap(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	detail := fmt.Sprintf("%s type=%d was not observed after RCON command", in.Map, in.GameType)
+	detail := fmt.Sprintf("%s type=%d was not observed within 30 seconds after map load", in.Map, in.GameType)
 	s.record("map_load", detail, "unconfirmed")
 	http.Error(w, detail, http.StatusBadGateway)
 }
