@@ -3,6 +3,8 @@ package app
 import (
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -169,6 +171,80 @@ func TestBotCommandFailure(t *testing.T) {
 	}
 	if got := botCommandFailure("print\n"); got != "" {
 		t.Fatalf("normal empty reply was treated as failure: %q", got)
+	}
+}
+
+func TestNextMapSlotPattern(t *testing.T) {
+	for _, tc := range []struct {
+		reply string
+		want  string
+	}{
+		{`"nextmap" is:"vstr d2^7" default:""`, "2"},
+		{`nextmap is "vstr d12"`, "12"},
+		{`"nextmap" is:"map q3dm6"`, ""},
+	} {
+		match := nextMapSlotPattern.FindStringSubmatch(tc.reply)
+		got := ""
+		if len(match) == 2 {
+			got = match[1]
+		}
+		if got != tc.want {
+			t.Errorf("next-map parse %q = %q, want %q", tc.reply, got, tc.want)
+		}
+	}
+}
+
+func TestFriendlyFireHandlerAppliesAndPersists(t *testing.T) {
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	commands := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 1024)
+		n, peer, readErr := listener.ReadFromUDP(buf)
+		if readErr != nil {
+			return
+		}
+		commands <- string(buf[:n])
+		_, _ = listener.WriteToUDP([]byte("\xff\xff\xff\xffprint\n"), peer)
+	}()
+	s := New(config.Config{RCONAddr: listener.LocalAddr().String(), StateFile: t.TempDir() + "/state.json"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gameplay/friendly-fire", strings.NewReader(`{"enabled":true}`))
+	res := httptest.NewRecorder()
+	s.friendlyFire(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	select {
+	case command := <-commands:
+		if !strings.Contains(command, "set g_friendlyFire 1") {
+			t.Fatalf("unexpected RCON command: %q", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("friendly-fire RCON command was not sent")
+	}
+	s.mu.RLock()
+	got := s.state.Policy.FriendlyFire
+	s.mu.RUnlock()
+	if !got {
+		t.Fatal("friendly-fire state was not persisted in memory")
+	}
+	var saved Persisted
+	body, err := os.ReadFile(s.cfg.StateFile)
+	if err != nil || json.Unmarshal(body, &saved) != nil || !saved.Policy.FriendlyFire {
+		t.Fatalf("friendly-fire state was not persisted: %q err=%v", body, err)
+	}
+}
+
+func TestFriendlyFireHandlerRejectsBadMethod(t *testing.T) {
+	s := New(config.Config{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gameplay/friendly-fire", nil)
+	res := httptest.NewRecorder()
+	s.friendlyFire(res, req)
+	if res.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d", res.Code)
 	}
 }
 
