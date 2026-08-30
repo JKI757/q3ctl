@@ -78,8 +78,16 @@ text = raw.decode("utf-8", "replace").replace("\ufffd", "")
 if "Bad rconpassword" in text:
     print("direct RCON status: FAILED (Quake rejected the configured password)")
     raise SystemExit(1)
-first = next((line for line in text.splitlines() if line.strip()), "<empty response>")
-print(f"direct RCON status: OK ({first[:160]})")
+# Quake's public status cvars appear on the line after its `print` envelope.
+# Report just map/mode rather than raw player addresses or any credential material.
+cvar_line = next((line for line in text.splitlines() if "\\\\mapname\\\\" in line), "")
+fields = cvar_line.strip().strip("\\\\").split("\\\\")
+cvars = dict(zip(fields[::2], fields[1::2]))
+if not cvars.get("mapname"):
+    print("direct RCON status: FAILED (reply lacked mapname)")
+    raise SystemExit(1)
+print("direct RCON status: OK (map=%s gametype=%s)" % (
+    cvars["mapname"], cvars.get("g_gametype", "unknown")))
 PY
 
 # Test the q3ctl API with the configured credentials; do not print credentials.
@@ -103,9 +111,13 @@ except Exception as exc:
 if isinstance(status, dict) and status.get('error'):
     print(f"q3ctl API status: FAILED ({status['error']})")
     raise SystemExit(1)
+server = status.get("server", {})
+if not isinstance(server, dict):
+    print("q3ctl API status: FAILED (missing server status object)")
+    raise SystemExit(1)
 print("q3ctl API status: OK")
-print("reported map:", status.get("map", status.get("mapname", "unknown")))
-print("reported gametype:", status.get("gametype", status.get("game_type", "unknown")))
+print("reported map:", server.get("map", "unknown"))
+print("reported gametype:", server.get("gametype", "unknown"))
 PY
 
 echo "RESULT: q3ctl connectivity checks passed"
