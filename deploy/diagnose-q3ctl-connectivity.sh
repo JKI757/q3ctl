@@ -87,7 +87,7 @@ if "Bad rconpassword" in map_reply or "Bad rconpassword" in type_reply:
     raise SystemExit(1)
 
 def cvar(reply, name):
-    match = re.search(r"(?:^|\\n)\\s*" + re.escape(name) + r'\\s+is\\s+"([^"]*)"', reply)
+    match = re.search(r"(?:^|\n)\s*" + re.escape(name) + r'\s+is\s+"([^"]*)"', reply)
     return match.group(1) if match else ""
 
 map_name = cvar(map_reply, "mapname")
