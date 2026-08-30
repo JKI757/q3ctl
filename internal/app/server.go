@@ -622,6 +622,19 @@ func (s *server) rebuildBots(p BotPolicy) (BotCounts, error) {
 	} else if botCounts(st.Players, 0).Total != 0 {
 		return BotCounts{}, errors.New("could not confirm old bots were removed; no bots were added")
 	}
+
+	// From this point a failed rebuild must leave the server clean. A partial
+	// roster makes the selected target look applied while a later addbot was
+	// lost or rejected.
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		_ = s.rconAllowTimeout("kickbots")
+		_, _ = s.waitForBotRoster(0, nil, 5*time.Second)
+	}()
+
 	opponentTeam := "blue"
 	if p.HumanTeam == "blue" {
 		opponentTeam = "red"
@@ -632,15 +645,9 @@ func (s *server) rebuildBots(p BotPolicy) (BotCounts, error) {
 		team  string
 	}{{p.FriendlyBots[:p.BotsPerTeam], p.HumanTeam}, {p.OpponentBots[:p.BotsPerTeam], opponentTeam}} {
 		for _, name := range entry.names {
-			if err := s.rconAllowTimeout(fmt.Sprintf("addbot %s %d %s", safeToken(name), p.BaseSkill, entry.team)); err != nil {
-				return BotCounts{}, err
-			}
-			// Quake can defer a bot connect. Confirm each named bot before sending
-			// another addbot so we identify the exact rejected/deferred command and
-			// never turn one missing bot into an ambiguous partial roster.
 			expected = append(expected, name)
-			if _, err := s.waitForBotRoster(len(expected), expected, 5*time.Second); err != nil {
-				return BotCounts{}, fmt.Errorf("Quake did not add bot %q on %s: %w", name, entry.team, err)
+			if err := s.addAndConfirmBot(name, entry.team, p.BaseSkill, expected); err != nil {
+				return BotCounts{}, err
 			}
 		}
 	}
@@ -648,9 +655,47 @@ func (s *server) rebuildBots(p BotPolicy) (BotCounts, error) {
 	if err != nil {
 		return BotCounts{}, fmt.Errorf("Quake did not report exactly %d named bots after rebuild: %w", 2*p.BotsPerTeam, err)
 	}
+	completed = true
 	// addbot's third argument assigned each exact named bot to red or blue.
 	// The stock status protocol cannot read that server-side team field back.
 	return BotCounts{TargetPerTeam: p.BotsPerTeam, Red: p.BotsPerTeam, Blue: p.BotsPerTeam, Total: botCounts(st.Players, p.BotsPerTeam).Total, TeamsKnown: false}, nil
+}
+
+// addAndConfirmBot retries only an indeterminate addbot. Stock ioquake3 has
+// no four-bot ceiling: it either adds the named bot immediately or prints a
+// concrete reason (for example, exhausted client slots). RCON runs over UDP,
+// however, so a missing reply/roster after one bounded observation may be a
+// dropped command. Never send the next bot until this one is observed.
+func (s *server) addAndConfirmBot(name, team string, skill int, expected []string) error {
+	command := fmt.Sprintf("addbot %s %d %s", safeToken(name), skill, team)
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		reply, err := s.rcon(command)
+		if err != nil && !isTimeout(err) {
+			return fmt.Errorf("could not add bot %q on %s: %w", name, team, err)
+		}
+		if message := botCommandFailure(reply); message != "" {
+			return fmt.Errorf("Quake rejected bot %q on %s: %s", name, team, message)
+		}
+		if _, err := s.waitForBotRoster(len(expected), expected, 5*time.Second); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		// Keep retry traffic well clear of ioquake3's connectionless-packet
+		// limiter, rather than immediately compounding an indeterminate add.
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("Quake did not add bot %q on %s after 3 attempts: %w", name, team, lastErr)
+}
+
+func botCommandFailure(reply string) string {
+	clean := strings.TrimSpace(stripQ3Colors(reply))
+	lower := strings.ToLower(clean)
+	if strings.Contains(lower, "unable to add bot") || strings.Contains(lower, "not defined") || strings.Contains(lower, "error:") {
+		return clean
+	}
+	return ""
 }
 
 // ioquake3 occasionally executes a UDP RCON command but drops its reply while

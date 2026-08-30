@@ -141,6 +141,18 @@ func TestIsTimeout(t *testing.T) {
 	}
 }
 
+func TestBotCommandFailure(t *testing.T) {
+	if got := botCommandFailure("^1Unable to add bot. All player slots are in use."); !strings.Contains(got, "Unable to add bot") {
+		t.Fatalf("did not preserve engine rejection: %q", got)
+	}
+	if got := botCommandFailure("Error: Bot 'Nope' not defined"); !strings.Contains(got, "not defined") {
+		t.Fatalf("did not preserve undefined-bot rejection: %q", got)
+	}
+	if got := botCommandFailure("print\n"); got != "" {
+		t.Fatalf("normal empty reply was treated as failure: %q", got)
+	}
+}
+
 func TestPopulateTeamsFromGameLog(t *testing.T) {
 	path := t.TempDir() + "/game.log"
 	sep := string('\\')
