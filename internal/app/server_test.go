@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"strings"
@@ -23,6 +24,17 @@ num score ping name            address               rate
 	}
 	if len(s.Players) != 2 || !s.Players[0].Bot || s.Players[1].Bot || s.Players[1].Name != "Joshua" {
 		t.Fatalf("unexpected players: %#v", s.Players)
+	}
+}
+
+func TestParseStatusEmptyPlayersSerializesAsArray(t *testing.T) {
+	st := parseStatus("map: q3dm6\n")
+	encoded, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"players":null`) || !strings.Contains(string(encoded), `"players":[]`) {
+		t.Fatalf("status JSON did not preserve an empty array: %s", encoded)
 	}
 }
 
