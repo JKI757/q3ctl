@@ -107,6 +107,16 @@ func TestBotCounts(t *testing.T) {
 	}
 }
 
+func TestHasExpectedBotNames(t *testing.T) {
+	players := []Player{{Name: "Sarge", Bot: true}, {Name: "Hunter", Bot: true}, {Name: "Joshua", Bot: false}}
+	if !hasExpectedBotNames(players, []string{"sarge", "HUNTER"}) {
+		t.Fatal("expected named bots to be found case-insensitively")
+	}
+	if hasExpectedBotNames(players, []string{"Sarge", "Major"}) {
+		t.Fatal("unexpected success when a requested bot is missing")
+	}
+}
+
 func TestIsTimeout(t *testing.T) {
 	if !isTimeout(&net.DNSError{IsTimeout: true}) {
 		t.Fatal("expected timeout to be recognized")
