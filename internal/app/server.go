@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -116,7 +117,10 @@ func (s *server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/players", s.players)
 	mux.HandleFunc("/api/v1/bots/policy", s.policy)
 	mux.HandleFunc("/api/v1/bots/reconcile", s.reconcile)
+	mux.HandleFunc("/api/v1/bots/add", s.addBot)
+	mux.HandleFunc("/api/v1/bots/rebalance", s.rebalanceBots)
 	mux.HandleFunc("/api/v1/gameplay/friendly-fire", s.friendlyFire)
+	mux.HandleFunc("/api/v1/gameplay/limits", s.matchLimits)
 	mux.HandleFunc("/api/v1/maps", s.maps)
 	mux.HandleFunc("/api/v1/maps/load", s.loadMap)
 	mux.HandleFunc("/api/v1/maps/restart", s.restartMap)
@@ -445,6 +449,10 @@ func (s *server) live() (Status, error) {
 	}
 	st.Map = values["mapname"]
 	st.GameType = gameType
+	st.TimeLimit, _ = strconv.Atoi(values["timelimit"])
+	st.FragLimit, _ = strconv.Atoi(values["fraglimit"])
+	st.CaptureLimit, _ = strconv.Atoi(values["capturelimit"])
+	st.MaxClients, _ = strconv.Atoi(values["sv_maxclients"])
 	s.rememberGameType(gameType)
 	s.populateTeamsFromGameLog(&st)
 	return st, nil
@@ -689,6 +697,271 @@ func (s *server) friendlyFire(w http.ResponseWriter, r *http.Request) {
 	}
 	s.record("friendly_fire", "live="+state, "applied")
 	out(w, map[string]bool{"enabled": request.Enabled})
+}
+
+type matchLimitsRequest struct {
+	TimeLimit    int `json:"timelimit"`
+	FragLimit    int `json:"fraglimit"`
+	CaptureLimit int `json:"capturelimit"`
+}
+
+func validateMatchLimits(x matchLimitsRequest) error {
+	if x.TimeLimit < 0 || x.TimeLimit > 120 {
+		return errors.New("timelimit must be between 0 and 120")
+	}
+	if x.FragLimit < 0 || x.FragLimit > 999 {
+		return errors.New("fraglimit must be between 0 and 999")
+	}
+	if x.CaptureLimit < 0 || x.CaptureLimit > 99 {
+		return errors.New("capturelimit must be between 0 and 99")
+	}
+	return nil
+}
+
+// matchLimits changes the active game's serverinfo cvars. ioquake3 marks
+// these CVAR_NORESTART and updates them each game frame, so this takes effect
+// now rather than waiting for the following map.
+func (s *server) matchLimits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request matchLimitsRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&request); err != nil || validateMatchLimits(request) != nil {
+		http.Error(w, "invalid match limits", http.StatusBadRequest)
+		return
+	}
+	if !s.beginBotOperation() {
+		http.Error(w, "another bot or gameplay operation is already running", http.StatusConflict)
+		return
+	}
+	defer s.endBotOperation()
+	for _, command := range []string{
+		fmt.Sprintf("set timelimit %d", request.TimeLimit),
+		fmt.Sprintf("set fraglimit %d", request.FragLimit),
+		fmt.Sprintf("set capturelimit %d", request.CaptureLimit),
+	} {
+		if _, err := s.rcon(command); err != nil {
+			s.record("match_limits", fmt.Sprintf("time=%d frag=%d capture=%d", request.TimeLimit, request.FragLimit, request.CaptureLimit), err.Error())
+			http.Error(w, "Quake did not accept match-limit change; earlier values may have applied: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+	st, err := s.live()
+	if err != nil || st.TimeLimit != request.TimeLimit || st.FragLimit != request.FragLimit || st.CaptureLimit != request.CaptureLimit {
+		detail := "match limits were not confirmed"
+		if err != nil {
+			detail += ": " + err.Error()
+		}
+		s.record("match_limits", fmt.Sprintf("time=%d frag=%d capture=%d", request.TimeLimit, request.FragLimit, request.CaptureLimit), detail)
+		http.Error(w, detail, http.StatusBadGateway)
+		return
+	}
+	s.record("match_limits", fmt.Sprintf("time=%d frag=%d capture=%d", request.TimeLimit, request.FragLimit, request.CaptureLimit), "applied and confirmed")
+	out(w, st)
+}
+
+type addBotRequest struct {
+	Name  string `json:"name"`
+	Team  string `json:"team"`
+	Skill int    `json:"skill"`
+}
+
+func configuredBotName(p BotPolicy, name string) (string, bool) {
+	for _, candidate := range append(append([]string{}, p.FriendlyBots...), p.OpponentBots...) {
+		if strings.EqualFold(candidate, strings.TrimSpace(name)) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func botNames(players []Player) []string {
+	names := make([]string, 0)
+	for _, player := range players {
+		if player.Bot {
+			names = append(names, player.Name)
+		}
+	}
+	return names
+}
+
+// addBot is an ad-hoc, verified addition. It does not alter the persisted
+// Bots/team target: a later rebuild intentionally restores that exact policy.
+func (s *server) addBot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request addBotRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&request); err != nil || (request.Team != "red" && request.Team != "blue") || request.Skill < 1 || request.Skill > 5 {
+		http.Error(w, "invalid bot request", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	policy := s.state.Policy
+	s.mu.RUnlock()
+	name, allowed := configuredBotName(policy, request.Name)
+	if !allowed {
+		http.Error(w, "bot is not in the configured bot roster", http.StatusBadRequest)
+		return
+	}
+	if !s.beginBotOperation() {
+		http.Error(w, "another bot or gameplay operation is already running", http.StatusConflict)
+		return
+	}
+	defer s.endBotOperation()
+	gameType, err := s.botGameType()
+	if err != nil {
+		http.Error(w, "could not determine live Quake mode: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if gameType != q3.GameTypeTDM && gameType != q3.GameTypeCTF {
+		http.Error(w, "adding a team bot requires Team Deathmatch or Capture the Flag", http.StatusConflict)
+		return
+	}
+	st, err := s.roster()
+	if err != nil {
+		http.Error(w, "could not read current bot roster: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	expected := botNames(st.Players)
+	for _, existing := range expected {
+		if strings.EqualFold(existing, name) {
+			http.Error(w, "that bot is already connected", http.StatusConflict)
+			return
+		}
+	}
+	expected = append(expected, name)
+	if err := s.addAndConfirmBot(name, request.Team, request.Skill, expected); err != nil {
+		s.record("bot_add", fmt.Sprintf("name=%s team=%s skill=%d", name, request.Team, request.Skill), err.Error())
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	confirmed, err := s.roster()
+	if err != nil {
+		http.Error(w, "bot was added but final roster read failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	counts := botCounts(confirmed.Players, policy.BotsPerTeam)
+	s.record("bot_add", fmt.Sprintf("name=%s team=%s skill=%d", name, request.Team, request.Skill), "confirmed")
+	out(w, map[string]any{"ok": true, "bot": name, "team": request.Team, "skill": request.Skill, "bot_counts": counts})
+}
+
+// rebalanceBots moves only existing bot clients. It requires complete,
+// game-VM-sourced team data and refuses to act if the current humans alone
+// cannot be balanced without moving a human.
+func (s *server) rebalanceBots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.beginBotOperation() {
+		http.Error(w, "another bot or gameplay operation is already running", http.StatusConflict)
+		return
+	}
+	defer s.endBotOperation()
+	st, err := s.live()
+	if err != nil {
+		http.Error(w, "could not read live teams: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if st.GameType != q3.GameTypeTDM && st.GameType != q3.GameTypeCTF {
+		http.Error(w, "bot rebalancing requires Team Deathmatch or Capture the Flag", http.StatusConflict)
+		return
+	}
+	if !teamDataComplete(st) {
+		http.Error(w, "authoritative team data is incomplete; no clients were moved", http.StatusConflict)
+		return
+	}
+	moves, err := botRebalanceMoves(st.Players)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if len(moves) == 0 {
+		out(w, map[string]any{"ok": true, "moves": 0, "message": "teams already balanced"})
+		return
+	}
+	for _, move := range moves {
+		if _, err := s.rcon(fmt.Sprintf("forceteam %d %s", move.ID, move.Team)); err != nil {
+			s.record("bot_rebalance", fmt.Sprintf("bot=%d team=%s", move.ID, move.Team), err.Error())
+			http.Error(w, "bot rebalance stopped; some earlier bot moves may have applied: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+	// The VM logs ClientUserinfoChanged after a forceteam operation. Poll that
+	// authoritative data rather than claiming success from the RCON reply alone.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		confirmed, readErr := s.live()
+		if readErr == nil && teamDataComplete(confirmed) {
+			if remaining, moveErr := botRebalanceMoves(confirmed.Players); moveErr == nil && len(remaining) == 0 {
+				s.record("bot_rebalance", fmt.Sprintf("moved=%d bots", len(moves)), "confirmed")
+				out(w, map[string]any{"ok": true, "moves": len(moves), "server": confirmed})
+				return
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	http.Error(w, "bot moves were sent but the balanced team state was not confirmed", http.StatusBadGateway)
+}
+
+type botTeamMove struct {
+	ID   int
+	Team string
+}
+
+// botRebalanceMoves returns the smallest set of bot-only transfers needed to
+// bring red/blue total player counts within one. It never moves a human and
+// fails closed if the human distribution makes that impossible.
+func botRebalanceMoves(players []Player) ([]botTeamMove, error) {
+	var redHumans, blueHumans int
+	var redBots, blueBots []Player
+	for _, player := range players {
+		switch player.Team {
+		case "red":
+			if player.Bot {
+				redBots = append(redBots, player)
+			} else {
+				redHumans++
+			}
+		case "blue":
+			if player.Bot {
+				blueBots = append(blueBots, player)
+			} else {
+				blueHumans++
+			}
+		}
+	}
+	redTotal, blueTotal := redHumans+len(redBots), blueHumans+len(blueBots)
+	if abs(redHumans-blueHumans) > len(redBots)+len(blueBots)+1 {
+		return nil, errors.New("human teams are too uneven to balance without moving a human")
+	}
+	if abs(redTotal-blueTotal) <= 1 {
+		return nil, nil
+	}
+	from, to := redBots, "blue"
+	difference := redTotal - blueTotal
+	if difference < 0 {
+		from, to, difference = blueBots, "red", -difference
+	}
+	movesNeeded := difference / 2
+	if len(from) < movesNeeded {
+		return nil, errors.New("teams cannot be balanced without moving a human")
+	}
+	moves := make([]botTeamMove, 0, movesNeeded)
+	for _, bot := range from[:movesNeeded] {
+		moves = append(moves, botTeamMove{ID: bot.ID, Team: to})
+	}
+	return moves, nil
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func (s *server) beginBotOperation() bool {
@@ -1331,12 +1604,5 @@ func (s *server) dashboard(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, strings.ReplaceAll(html, "__CSRF__", s.csrfToken))
 }
 
-var html = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>q3ctl</title><style>:root{color-scheme:dark}body{font:15px system-ui;background:#10151c;color:#e8edf3;margin:0}main{max-width:1200px;margin:auto;padding:22px}h1{margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;margin:14px 0}.card{background:#18212c;border:1px solid #304050;border-radius:10px;padding:14px}button,select,input{font:inherit;padding:8px;margin:3px}button{background:#2563eb;color:white;border:0;border-radius:6px;cursor:pointer;transition:transform .08s,filter .12s,opacity .12s}button:hover{filter:brightness(1.12)}button:active,button.pressed{transform:translateY(2px) scale(.98);filter:brightness(.8)}button:disabled{opacity:.62;cursor:wait}button.danger{background:#b91c1c}pre{white-space:pre-wrap;background:#090d12;padding:12px;max-height:280px;overflow:auto;border-radius:6px}.rotation-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:7px 0;border-bottom:1px solid #304050}.rotation-row:last-child{border-bottom:0}.rotation-row b{min-width:24px}.rotation-row .limits{display:flex;gap:4px;align-items:center}.rotation-row .limits label{margin:0;font-size:12px;color:#afbdcc}.rotation-row .limits input{width:4.2em;padding:5px;margin:0}.pill{padding:3px 7px;border-radius:12px;background:#28435d}label{display:block;margin:5px 0}</style><main><h1>Quake 3 Control</h1><p>Private Tailscale dashboard · Server-local RCON</p><div class=grid><section class=card><h2>Live server</h2><div id=summary>Loading…</div><button onclick=refresh()>Refresh status</button><button onclick=post('/api/v1/maps/restart',{})>Restart map (5s)</button><button class=danger onclick=nextMap()>Next map</button><h3>Players</h3><div id=players></div></section><section class=card><h2>Map & mode</h2><label>Map <select id=map></select></label><label>Mode <select id=mode><option value=0>Free For All</option><option value=1>Tournament</option><option value=3>Team Deathmatch</option><option value=4>Capture the Flag</option></select></label><button onclick=loadMap()>Load map</button><h3>Announcement</h3><input id=msg maxlength=140 placeholder="Message to all players"><button onclick=announce()>Send</button></section><section class=card><h2>Bot director</h2><label>Human team <select id=team><option>red</option><option>blue</option></select></label><label>Bots/team <input id=bots type=number min=0 max=4></label><label>Base skill <input id=skill type=number min=1 max=5></label><button id=friendlyFire onclick=toggleFriendlyFire()>Friendly fire: loading…</button><label><input id=adaptive type=checkbox> adaptive next-round policy</label><div id=botActual class=pill>Actual bots: loading…</div><button class="bot-action" onclick=savePolicy()>Save & apply policy</button><button class="bot-action" onclick=reconcile()>Rebuild bot teams</button><p><small>Saving applies exactly the selected bots per team; automatic Quake bot filling is disabled.</small></p></section><section class=card><h2>Rotation</h2><div id=rotation></div><button onclick=addRotation()>Add map</button><button onclick=saveRotation()>Save rotation</button><button onclick=applyRotation()>Apply at next map</button><p><small>Save persists the definition atomically. Apply installs it as Quake's next-map chain without interrupting the current match.</small></p></section></div><section class=card><h2>Live game log</h2><pre id=gameLog>Connecting…</pre></section><section class=card><h2>q3ctl control log</h2><pre id=auditLog>Connecting…</pre></section></main><script>const csrf='__CSRF__';let state,mapCatalog=[],policyHydrated=false;const $=id=>document.getElementById(id);function setBusy(button,busy){if(!button)return;button.disabled=busy;button.classList.toggle('pressed',busy);if(busy){button.dataset.label=button.textContent;button.textContent='Working…'}else if(button.dataset.label){button.textContent=button.dataset.label;delete button.dataset.label}}let activeButton=null;document.addEventListener('click',e=>{let b=e.target.closest('button');if(!b)return;activeButton=b;b.classList.add('pressed');setTimeout(()=>b.classList.remove('pressed'),180)},true);async function api(u,o={}){let h=new Headers(o.headers||{});let mutation=o.method&&o.method!=='GET';if(mutation)h.set('X-CSRF-Token',csrf);let button=mutation?activeButton:null;if(button)setBusy(button,true);try{let r=await fetch(u,{...o,headers:h});if(!r.ok)throw Error(await r.text());return r.json()}finally{if(button)setBusy(button,false)}}async function post(u,b){try{await api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})}catch(e){alert(e)}finally{refresh()}}function esc(x){return String(x).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}function modeName(x){return ({0:'FFA',1:'Tournament',3:'TDM',4:'CTF'})[x]||'Unknown'}function playerLine(p){return '<div><span class=pill>'+p.id+'</span> '+esc(p.name)+' '+(p.bot?'BOT':'HUMAN')+' score '+p.score+' <button class=danger onclick="kick('+p.id+')">Kick</button></div>'}function renderPlayers(players,gametype){if(!players.length)return 'Nobody connected';if(gametype!==3&&gametype!==4||!players.some(p=>p.team))return players.map(playerLine).join('');let groups={red:[],blue:[],spectator:[],other:[]};players.forEach(p=>(groups[p.team]||groups.other).push(p));return ['red','blue','spectator','other'].filter(team=>groups[team].length).map(team=>'<h4>'+team[0].toUpperCase()+team.slice(1)+'</h4>'+groups[team].map(playerLine).join('')).join('')}function renderMapSelect(){let select=$('map'),previous=select.value,mode=+$('mode').value;let matching=mapCatalog.filter(info=>Array.isArray(info.gametypes)&&info.gametypes.includes(mode));select.innerHTML=matching.map(info=>'<option value="'+esc(info.name)+'">'+esc(info.name)+'</option>').join('');if([...select.options].some(option=>option.value===previous))select.value=previous;else if(!matching.length)select.innerHTML='<option value="">No installed maps declared for '+modeName(mode)+'</option>'}function append(id,text){let e=$(id);let follow=e.scrollHeight-e.scrollTop-e.clientHeight<24;e.textContent+=text+'\n';if(e.textContent.length>128000)e.textContent=e.textContent.slice(-96000);if(follow)e.scrollTop=e.scrollHeight}async function refresh(){try{state=await api('/api/v1/status');let s=state.server||{},players=Array.isArray(s.players)?s.players:[],h=state.host||{};let mem=h.memory_total_bytes?Math.round(100*h.memory_available_bytes/h.memory_total_bytes):0;$('summary').innerHTML='<b>'+esc(s.map||'Unknown')+'</b> · '+modeName(s.gametype)+' · '+players.length+'/'+(s.max_clients??'?')+' players<br><small>Host load '+(+h.load_1||0).toFixed(2)+' · memory '+mem+'% free</small>';$('players').innerHTML=renderPlayers(players,s.gametype);let bc=state.bot_counts||{};let botText='Actual bots: '+(bc.total??0)+' total · target '+(bc.target_per_team??0)+' per team';if(bc.teams_known)botText+=' · '+(bc.red??0)+' red / '+(bc.blue??0)+' blue';else botText+=' · team readback unavailable in stock ioquake3';$('botActual').textContent=botText;let ff=!!(state.policy&&state.policy.friendly_fire);$('friendlyFire').textContent='Friendly fire: '+(ff?'ON — turn off':'OFF — turn on');$('friendlyFire').classList.toggle('danger',ff);if(!policyHydrated){$('team').value=state.policy.human_team;$('bots').value=state.policy.bots_per_team;$('skill').value=state.policy.base_skill;$('adaptive').checked=state.policy.adaptive;policyHydrated=true}renderRotation()}catch(e){$('summary').textContent='Status unavailable: '+e}}async function kick(id){if(confirm('Kick client '+id+'?'))await post('/api/v1/players/kick',{id})}async function nextMap(){if(confirm('End the current map and advance to the rotation’s next map?'))await post('/api/v1/maps/next',{})}async function loadMap(){if(confirm('Load selected map now?'))await post('/api/v1/maps/load',{map:$('map').value,gametype:+$('mode').value})}async function announce(){await post('/api/v1/announce',{message:$('msg').value});$('msg').value=''}async function savePolicy(){let p={...state.policy,human_team:$('team').value,bots_per_team:+$('bots').value,base_skill:+$('skill').value,adaptive:$('adaptive').checked};try{await api('/api/v1/bots/policy',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)})}catch(e){alert(e)}finally{refresh()}}async function reconcile(){if(confirm('Kick and rebuild all bots on configured teams?'))await post('/api/v1/bots/reconcile',{})}async function toggleFriendlyFire(){let enabled=!(state.policy&&state.policy.friendly_fire);if(!confirm('Turn friendly fire '+(enabled?'on':'off')+' now?'))return;try{await api('/api/v1/gameplay/friendly-fire',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})})}catch(e){alert(e)}finally{refresh()}}function allMapOptions(){return mapCatalog.map(info=>'<option value="'+esc(info.name)+'">'+esc(info.name)+'</option>').join('')}function rotationRow(r,i){let maps=allMapOptions();return '<div class=rotation-row data-rotation-row='+i+'><b>#'+(i+1)+'</b><select class=rot-map>'+maps+'</select><select class=rot-mode><option value=0>FFA</option><option value=1>Tournament</option><option value=3>TDM</option><option value=4>CTF</option></select><span class=limits><label>Time <input class=rot-time type=number min=0 max=120 value='+r.timelimit+'></label><label>Frags <input class=rot-frags type=number min=0 max=999 value='+r.fraglimit+'></label><label>Caps <input class=rot-caps type=number min=0 max=99 value='+r.capturelimit+'></label></span><button class=danger onclick=removeRotation('+i+')>Remove</button></div>'}function renderRotation(){let root=$('rotation');root.innerHTML=state.rotation.map(rotationRow).join('');[...root.querySelectorAll('[data-rotation-row]')].forEach((row,i)=>{row.querySelector('.rot-map').value=state.rotation[i].map;row.querySelector('.rot-mode').value=state.rotation[i].gametype})}function addRotation(){if(state.rotation.length>=12)return alert('A rotation can contain at most 12 maps');state.rotation.push({map:'q3ctf1',gametype:4,timelimit:20,fraglimit:0,capturelimit:8});renderRotation()}function removeRotation(i){if(state.rotation.length===1)return alert('A rotation needs at least one map');state.rotation.splice(i,1);renderRotation()}function readRotation(){return [...$('rotation').querySelectorAll('[data-rotation-row]')].map(row=>({map:row.querySelector('.rot-map').value,gametype:+row.querySelector('.rot-mode').value,timelimit:+row.querySelector('.rot-time').value,fraglimit:+row.querySelector('.rot-frags').value,capturelimit:+row.querySelector('.rot-caps').value}))}async function saveRotation(){try{state.rotation=readRotation();state.rotation=await api('/api/v1/rotation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(state.rotation)});renderRotation();alert('Rotation saved permanently')}catch(e){alert(e)}}async function applyRotation(){try{if(!confirm('Install the saved rotation for the next map? The current match will continue.'))return;let r=await api('/api/v1/rotation/apply',{method:'POST'});alert('Rotation installed: '+r.rotation.length+' maps will start at the next map')}catch(e){alert(e)}}async function init(){
-  $('mode').addEventListener('change',renderMapSelect);
-  startLogs();
-  await refresh();
-  if(state&&state.server&&validGameType(state.server.gametype))$('mode').value=state.server.gametype;
-  try{mapCatalog=await api('/api/v1/maps');renderMapSelect();renderRotation()}catch(e){$('map').innerHTML='<option value="">Map catalog unavailable: '+esc(e)+'</option>';renderRotation()}
-}
-function validGameType(x){return x===0||x===1||x===3||x===4}
-function startLogs(){let es=new EventSource('/api/v1/logs/stream');es.addEventListener('connected',e=>{let m='[connected] '+JSON.parse(e.data).message;$('gameLog').textContent=m+'\n';$('auditLog').textContent=m+'\n'});es.addEventListener('game',e=>append('gameLog',JSON.parse(e.data).line));es.addEventListener('audit',e=>append('auditLog',JSON.stringify(JSON.parse(e.data))));es.onerror=()=>{append('gameLog','[stream reconnecting]');append('auditLog','[stream reconnecting]')}}init()</script>`
+//go:embed dashboard.html
+var html string

@@ -270,3 +270,61 @@ func TestSafeToken(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestValidateMatchLimits(t *testing.T) {
+	if err := validateMatchLimits(matchLimitsRequest{TimeLimit: 20, FragLimit: 40, CaptureLimit: 8}); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []matchLimitsRequest{
+		{TimeLimit: -1},
+		{TimeLimit: 121},
+		{FragLimit: -1},
+		{FragLimit: 1000},
+		{CaptureLimit: -1},
+		{CaptureLimit: 100},
+	} {
+		if err := validateMatchLimits(invalid); err == nil {
+			t.Fatalf("invalid match limits accepted: %#v", invalid)
+		}
+	}
+}
+
+func TestConfiguredBotName(t *testing.T) {
+	p := defaults().Policy
+	if got, ok := configuredBotName(p, "hUnTeR"); !ok || got != "Hunter" {
+		t.Fatalf("configured bot = %q, %v", got, ok)
+	}
+	if _, ok := configuredBotName(p, "not-a-bot"); ok {
+		t.Fatal("unconfigured bot was accepted")
+	}
+}
+
+func TestBotRebalanceMovesOnlyBots(t *testing.T) {
+	players := []Player{
+		{ID: 1, Bot: false, Team: "red"},
+		{ID: 2, Bot: false, Team: "red"},
+		{ID: 3, Bot: true, Team: "red"},
+		{ID: 4, Bot: true, Team: "red"},
+		{ID: 5, Bot: true, Team: "red"},
+		{ID: 6, Bot: false, Team: "blue"},
+	}
+	moves, err := botRebalanceMoves(players)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moves) != 2 || moves[0].ID != 3 || moves[1].ID != 4 || moves[0].Team != "blue" {
+		t.Fatalf("unexpected moves: %#v", moves)
+	}
+}
+
+func TestBotRebalanceRefusesHumanMove(t *testing.T) {
+	_, err := botRebalanceMoves([]Player{
+		{ID: 1, Bot: false, Team: "red"},
+		{ID: 2, Bot: false, Team: "red"},
+		{ID: 3, Bot: false, Team: "red"},
+		{ID: 4, Bot: true, Team: "red"},
+	})
+	if err == nil {
+		t.Fatal("expected bot-only rebalance to refuse an impossible human imbalance")
+	}
+}
