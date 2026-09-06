@@ -338,11 +338,24 @@ func hasExpectedBotNames(players []Player, names []string) bool {
 }
 
 func (s *server) roster() (Status, error) {
-	raw, err := s.rcon("status")
-	if err != nil {
-		return Status{}, err
+	// A live dashboard refresh and a mutation share the same paced UDP gate,
+	// but ioquake3 can still drop an individual connectionless status reply.
+	// A single timeout is indeterminate, not evidence that the roster vanished.
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		raw, err := s.rcon("status")
+		if err == nil {
+			return parseStatus(raw), nil
+		}
+		if !isTimeout(err) {
+			return Status{}, err
+		}
+		lastErr = err
+		if attempt < 3 {
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
-	return parseStatus(raw), nil
+	return Status{}, lastErr
 }
 
 // waitForBotRoster uses only the engine's authenticated status table. Avoid
