@@ -303,16 +303,16 @@ func TestBotRebalanceMovesOnlyBots(t *testing.T) {
 	players := []Player{
 		{ID: 1, Bot: false, Team: "red"},
 		{ID: 2, Bot: false, Team: "red"},
-		{ID: 3, Bot: true, Team: "red"},
-		{ID: 4, Bot: true, Team: "red"},
-		{ID: 5, Bot: true, Team: "red"},
+		{ID: 3, Name: "Sarge", Bot: true, Team: "red"},
+		{ID: 4, Name: "Major", Bot: true, Team: "red"},
+		{ID: 5, Name: "Hunter", Bot: true, Team: "red"},
 		{ID: 6, Bot: false, Team: "blue"},
 	}
 	moves, err := botRebalanceMoves(players)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(moves) != 2 || moves[0].ID != 3 || moves[1].ID != 4 || moves[0].Team != "blue" {
+	if len(moves) != 2 || moves[0].ID != 3 || moves[1].ID != 4 || moves[0].Name != "Sarge" || moves[1].Name != "Major" || moves[0].Team != "blue" {
 		t.Fatalf("unexpected moves: %#v", moves)
 	}
 }

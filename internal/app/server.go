@@ -890,26 +890,90 @@ func (s *server) rebalanceBots(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The VM logs ClientUserinfoChanged after a forceteam operation. Poll that
-	// authoritative data rather than claiming success from the RCON reply alone.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		confirmed, readErr := s.live()
-		if readErr == nil && teamDataComplete(confirmed) {
-			if remaining, moveErr := botRebalanceMoves(confirmed.Players); moveErr == nil && len(remaining) == 0 {
-				s.record("bot_rebalance", fmt.Sprintf("moved=%d bots", len(moves)), "confirmed")
-				out(w, map[string]any{"ok": true, "moves": len(moves), "server": confirmed})
-				return
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
+	// Prefer the game VM's native forceteam command: it preserves the bot and
+	// its in-game state. Some stock ioquake3 builds acknowledge that command
+	// but do not actually move bot clients. In that case, replace only the
+	// selected bot on the requested team, then verify the VM game log state.
+	if confirmed, ok := s.waitForBalancedBotTeams(5 * time.Second); ok {
+		s.record("bot_rebalance", fmt.Sprintf("moved=%d bots", len(moves)), "confirmed")
+		out(w, map[string]any{"ok": true, "moves": len(moves), "server": confirmed})
+		return
 	}
-	http.Error(w, "bot moves were sent but the balanced team state was not confirmed", http.StatusBadGateway)
+	s.mu.RLock()
+	policy := s.state.Policy
+	s.mu.RUnlock()
+	for _, move := range moves {
+		if err := s.replaceBotOnTeam(move.Name, move.Team, policy.BaseSkill); err != nil {
+			s.record("bot_rebalance", fmt.Sprintf("bot=%s team=%s", move.Name, move.Team), err.Error())
+			http.Error(w, "bot rebalance could not replace the selected bot: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+	if confirmed, ok := s.waitForBalancedBotTeams(5 * time.Second); ok {
+		s.record("bot_rebalance", fmt.Sprintf("replaced=%d bots", len(moves)), "confirmed")
+		out(w, map[string]any{"ok": true, "moves": len(moves), "replaced": true, "server": confirmed})
+		return
+	}
+	http.Error(w, "bot team change was not confirmed from the game log", http.StatusBadGateway)
 }
 
 type botTeamMove struct {
 	ID   int
+	Name string
 	Team string
+}
+
+func (s *server) waitForBalancedBotTeams(timeout time.Duration) (Status, bool) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		confirmed, err := s.live()
+		if err == nil && teamDataComplete(confirmed) {
+			if remaining, moveErr := botRebalanceMoves(confirmed.Players); moveErr == nil && len(remaining) == 0 {
+				return confirmed, true
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return Status{}, false
+}
+
+// replaceBotOnTeam is a bot-only fallback for stock servers where forceteam
+// acknowledges a bot move but leaves the bot on its old team. It first proves
+// the selected bot was removed, then recreates exactly that bot on the target
+// team. No human client is addressed or moved.
+func (s *server) replaceBotOnTeam(name, team string, skill int) error {
+	st, err := s.roster()
+	if err != nil {
+		return fmt.Errorf("could not read bot roster: %w", err)
+	}
+	expected := botNames(st.Players)
+	var selected Player
+	found := false
+	for _, player := range st.Players {
+		if player.Bot && strings.EqualFold(player.Name, name) {
+			selected, found = player, true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("selected bot %q is no longer connected", name)
+	}
+	remaining := make([]string, 0, len(expected)-1)
+	for _, existing := range expected {
+		if !strings.EqualFold(existing, selected.Name) {
+			remaining = append(remaining, existing)
+		}
+	}
+	if _, err := s.rcon(fmt.Sprintf("clientkick %d", selected.ID)); err != nil {
+		return fmt.Errorf("could not remove bot %q: %w", selected.Name, err)
+	}
+	if _, err := s.waitForBotRoster(len(remaining), remaining, 5*time.Second); err != nil {
+		return fmt.Errorf("could not confirm removal of bot %q: %w", selected.Name, err)
+	}
+	if err := s.addAndConfirmBot(selected.Name, team, skill, append(remaining, selected.Name)); err != nil {
+		return err
+	}
+	return nil
 }
 
 // botRebalanceMoves returns the smallest set of bot-only transfers needed to
@@ -952,7 +1016,7 @@ func botRebalanceMoves(players []Player) ([]botTeamMove, error) {
 	}
 	moves := make([]botTeamMove, 0, movesNeeded)
 	for _, bot := range from[:movesNeeded] {
-		moves = append(moves, botTeamMove{ID: bot.ID, Team: to})
+		moves = append(moves, botTeamMove{ID: bot.ID, Name: bot.Name, Team: to})
 	}
 	return moves, nil
 }
